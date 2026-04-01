@@ -1,0 +1,876 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// BETTER AUTH MODELS (Required for better-auth)
+// ============================================
+
+model User {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  name          String
+  image         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Auth
+  passwordHash String?
+
+  // Better Auth fields
+  twoFactorEnabled Boolean @default(false)
+
+  // Profile
+  phone         String? @unique
+  phoneVerified Boolean @default(false)
+  bio           String?
+
+  // Role & Permissions
+  role        UserRole @default(USER)
+  permissions String[] @default([])
+
+  // Verification & Trust
+  idVerified         Boolean            @default(false)
+  idDocumentUrl      String?
+  selfieUrl          String?
+  verificationStatus VerificationStatus @default(UNVERIFIED)
+
+  // Trust Metrics
+  rating           Float @default(0)
+  totalSwaps       Int   @default(0)
+  successfulSwaps  Int   @default(0)
+  failedSwaps      Int   @default(0)
+  confirmationRate Float @default(0)
+  trustScore       Int   @default(0)
+
+  // Location
+  country            String?
+  city               String?
+  state              String?
+  latitude           Float?
+  longitude          Float?
+  lastLocationUpdate DateTime?
+
+  // Account Status
+  isActive  Boolean   @default(true)
+  isBanned  Boolean   @default(false)
+  banReason String?
+  bannedAt  DateTime?
+  bannedBy  String?   @db.ObjectId
+  banExpiry DateTime?
+
+  // Suspension (less severe than ban) ✅ ADDED
+  isSuspended      Boolean   @default(false)
+  suspensionReason String?
+  suspendedAt      DateTime?
+  suspendedBy      String?   @db.ObjectId
+  suspensionExpiry DateTime?
+
+  // Soft Delete ✅ ADDED
+  deletedAt DateTime?
+
+  // Premium Features (for monetization)
+  isPremium           Boolean      @default(false)
+  premiumTier         PremiumTier?
+  premiumExpiry       DateTime?
+  verificationFeePaid Boolean      @default(false)
+
+  // Preferences
+  preferredCurrencies     String[] @default([])
+  preferredMeetingPlaces  String[] @default([])
+  maxSwapAmount           Float    @default(0)
+  notificationPreferences Json?
+  languagePreference      String   @default("en")
+
+  // App Settings
+  darkMode      Boolean @default(false)
+  receiveEmails Boolean @default(true)
+  receiveSMS    Boolean @default(true)
+  receivePush   Boolean @default(true)
+
+  // Relations
+  accounts     Account[]
+  sessions     Session[]
+  verification Verification[]
+
+  offersCreated     SwapOffer[]       @relation("OfferCreator")
+  swapsAsInitiator  Swap[]            @relation("SwapInitiator")
+  swapsAsReceiver   Swap[]            @relation("SwapReceiver")
+  messages          Message[]
+  ratingsGiven      Rating[]          @relation("RatingGiver")
+  ratingsReceived   Rating[]          @relation("RatingReceiver")
+  disputes          Dispute[]
+  disputesResolved  Dispute[]         @relation("DisputeResolver")
+  notifications     Notification[]
+  transactions      Transaction[]
+  savedLocations    SavedLocation[]   @relation("SavedLocations")
+  blockedUsers      BlockedUser[]     @relation("BlockedBy")
+  blockedBy         BlockedUser[]     @relation("Blocking")
+  referralsMade     Referral[]        @relation("ReferralsMade")
+  referralsReceived Referral[]        @relation("ReferralsReceived")
+  favorites         FavoriteUser[]    @relation("Favorites")
+  favoritedBy       FavoriteUser[]    @relation("FavoritedBy")
+  securityDeposits  SecurityDeposit[] @relation("SecurityDeposits")
+  pushTokens        PushToken[]       @relation("PushTokens")
+  activities        ActivityLog[]     @relation("Activities")
+  adminLogs         AdminLog[]
+}
+
+// ✅ ADDED - Add this enum
+enum VerificationStatus {
+  UNVERIFIED
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum UserRole {
+  USER
+  STAFF
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum PremiumTier {
+  BASIC
+  PREMIUM
+  BUSINESS
+}
+
+model Account {
+  id                String  @id @default(auto()) @map("_id") @db.ObjectId
+  userId            String  @db.ObjectId
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  sessionToken String   @unique
+  userId       String   @db.ObjectId
+  expires      DateTime
+  ipAddress    String?
+  userAgent    String?
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Verification {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  identifier String
+  token      String   @unique
+  expires    DateTime
+  userId     String?  @db.ObjectId
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([identifier, token])
+}
+
+// ============================================
+// SWAP OFFERS & MATCHING
+// ============================================
+
+model SwapOffer {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  userId String @db.ObjectId
+  user   User   @relation("OfferCreator", fields: [userId], references: [id], onDelete: Cascade)
+
+  // Currencies
+  haveCurrency String
+  wantCurrency String
+  haveAmount   Float // Changed from Decimal to Float
+  wantAmount   Float // Changed from Decimal to Float
+  exchangeRate Float // Changed from Decimal to Float
+
+  // Location
+  country     String
+  city        String
+  state       String?
+  latitude    Float
+  longitude   Float
+  meetingArea String?
+  radius      Int     @default(5) // km
+
+  // Availability
+  availableFrom  DateTime
+  availableUntil DateTime
+  timeSlots      String[] @default([])
+  isFlexible     Boolean  @default(true)
+
+  // Status
+  status     OfferStatus     @default(ACTIVE)
+  visibility OfferVisibility @default(PUBLIC)
+
+  // Additional Info
+  notes                  String?
+  preferredMeetingPlaces String[] @default([])
+  requiresVerifiedUsers  Boolean  @default(false)
+  minTrustScore          Int      @default(0)
+
+  // Metadata
+  viewCount  Int @default(0)
+  matchCount Int @default(0)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  expiresAt DateTime?
+
+  // Relations
+  swaps Swap[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([haveCurrency, wantCurrency])
+  @@index([country, city])
+  @@index([createdAt])
+}
+
+enum OfferStatus {
+  ACTIVE
+  MATCHED
+  COMPLETED
+  CANCELLED
+  EXPIRED
+  PAUSED
+}
+
+enum OfferVisibility {
+  PUBLIC
+  VERIFIED_ONLY
+  PREMIUM_ONLY
+  PRIVATE
+}
+
+// ============================================
+// SWAP TRANSACTIONS
+// ============================================
+
+model Swap {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+
+  // Parties
+  initiatorId String @db.ObjectId
+  initiator   User   @relation("SwapInitiator", fields: [initiatorId], references: [id])
+  receiverId  String @db.ObjectId
+  receiver    User   @relation("SwapReceiver", fields: [receiverId], references: [id])
+
+  // Linked Offer
+  offerId String    @db.ObjectId
+  offer   SwapOffer @relation(fields: [offerId], references: [id])
+
+  // Swap Details
+  initiatorGivesCurrency String
+  initiatorGivesAmount   Float // Changed from Decimal to Float
+  receiverGivesCurrency  String
+  receiverGivesAmount    Float // Changed from Decimal to Float
+  agreedExchangeRate     Float // Changed from Decimal to Float
+
+  // Meetup Details
+  meetupLocation  String?
+  meetupAddress   String?
+  meetupTime      DateTime?
+  meetupLatitude  Float?
+  meetupLongitude Float?
+  meetupNotes     String?
+
+  // Status Flow
+  status SwapStatus @default(PENDING)
+
+  // Confirmations
+  initiatorSentConfirmed     Boolean   @default(false)
+  initiatorSentAt            DateTime?
+  initiatorReceivedConfirmed Boolean   @default(false)
+  initiatorReceivedAt        DateTime?
+
+  receiverSentConfirmed     Boolean   @default(false)
+  receiverSentAt            DateTime?
+  receiverReceivedConfirmed Boolean   @default(false)
+  receiverReceivedAt        DateTime?
+
+  // Completion
+  completedAt        DateTime?
+  cancelledAt        DateTime?
+  cancelledBy        String?   @db.ObjectId
+  cancellationReason String?
+
+  // Safety
+  securityDepositRequired Boolean @default(false)
+  securityDepositAmount   Float? // Changed from Decimal to Float
+
+  // Reminders
+  remindersSent  Int       @default(0)
+  lastReminderAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  messages Message[]
+  ratings  Rating[]
+  disputes Dispute[]
+
+  @@index([initiatorId])
+  @@index([receiverId])
+  @@index([offerId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum SwapStatus {
+  PENDING
+  AGREED
+  IN_PROGRESS
+  CONFIRMING
+  COMPLETED
+  CANCELLED
+  DISPUTED
+  FAILED
+  EXPIRED
+}
+
+// ============================================
+// MESSAGING
+// ============================================
+
+model Message {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  swapId String @db.ObjectId
+  swap   Swap   @relation(fields: [swapId], references: [id], onDelete: Cascade)
+
+  senderId String @db.ObjectId
+  sender   User   @relation(fields: [senderId], references: [id])
+
+  content     String
+  messageType MessageType @default(TEXT)
+  attachments String[]    @default([])
+
+  isRead    Boolean   @default(false)
+  readAt    DateTime?
+  isEdited  Boolean   @default(false)
+  editedAt  DateTime?
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([swapId])
+  @@index([senderId])
+  @@index([createdAt])
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  LOCATION
+  SYSTEM
+}
+
+// ============================================
+// RATINGS & REVIEWS
+// ============================================
+
+model Rating {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  swapId String @db.ObjectId
+  swap   Swap   @relation(fields: [swapId], references: [id])
+
+  giverId    String @db.ObjectId
+  giver      User   @relation("RatingGiver", fields: [giverId], references: [id])
+  receiverId String @db.ObjectId
+  receiver   User   @relation("RatingReceiver", fields: [receiverId], references: [id])
+
+  stars   Int
+  comment String?
+
+  // Rating Categories
+  punctuality     Int?
+  communication   Int?
+  professionalism Int?
+  safety          Int?
+
+  // Moderation
+  isReported   Boolean @default(false)
+  reportReason String?
+  isHidden     Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([swapId, giverId])
+  @@index([receiverId])
+  @@index([createdAt])
+}
+
+// ============================================
+// DISPUTES & MODERATION
+// ============================================
+
+model Dispute {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  swapId String @db.ObjectId
+  swap   Swap   @relation(fields: [swapId], references: [id])
+
+  reporterId String @db.ObjectId
+  reporter   User   @relation(fields: [reporterId], references: [id])
+
+  reason      DisputeReason
+  description String
+  evidence    String[]      @default([])
+
+  status         DisputeStatus   @default(OPEN)
+  priority       DisputePriority @default(MEDIUM)
+  resolution     String?
+  resolutionNote String?
+  resolvedById   String?         @db.ObjectId
+  resolvedBy     User?           @relation("DisputeResolver", fields: [resolvedById], references: [id])
+  resolvedAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([swapId])
+  @@index([reporterId])
+  @@index([status])
+  @@index([priority])
+}
+
+enum DisputeReason {
+  NO_SHOW
+  WRONG_AMOUNT
+  FAKE_CURRENCY
+  UNSAFE_BEHAVIOR
+  HARASSMENT
+  FRAUD
+  COUNTERFEIT_MONEY
+  THREATENING_BEHAVIOR
+  OTHER
+}
+
+enum DisputeStatus {
+  OPEN
+  INVESTIGATING
+  RESOLVED
+  CLOSED
+  ESCALATED
+}
+
+enum DisputePriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+// ============================================
+// NOTIFICATIONS
+// ============================================
+
+model Notification {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  userId String @db.ObjectId
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type    NotificationType
+  title   String
+  message String
+  link    String?
+  data    Json?
+
+  isRead  Boolean   @default(false)
+  readAt  DateTime?
+  isPush  Boolean   @default(true)
+  isEmail Boolean   @default(false)
+  isSMS   Boolean   @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead])
+  @@index([createdAt])
+}
+
+enum NotificationType {
+  MATCH_FOUND
+  SWAP_REQUEST
+  SWAP_ACCEPTED
+  SWAP_REJECTED
+  MESSAGE_RECEIVED
+  SWAP_CONFIRMED
+  SWAP_COMPLETED
+  SWAP_CANCELLED
+  RATING_RECEIVED
+  DISPUTE_FILED
+  DISPUTE_RESOLVED
+  VERIFICATION_APPROVED
+  VERIFICATION_REJECTED
+  PREMIUM_EXPIRING
+  PREMIUM_EXPIRED
+  ACCOUNT_WARNING
+  SYSTEM_ALERT
+  PROMOTIONAL
+}
+
+// ============================================
+// REVENUE & TRANSACTIONS
+// ============================================
+
+model Transaction {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  userId String @db.ObjectId
+  user   User   @relation(fields: [userId], references: [id])
+
+  type     TransactionType
+  amount   Float // Changed from Decimal to Float
+  currency String          @default("USD")
+
+  description String
+  status      TransactionStatus @default(PENDING)
+
+  // Payment Gateway Details
+  paymentMethod        String?
+  paymentGateway       String?
+  gatewayTransactionId String?
+  gatewayResponse      Json?
+
+  // For revenue tracking
+  platformFee Float? // Changed from Decimal to Float
+
+  // Metadata
+  metadata Json?
+
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+  failedAt    DateTime?
+  refundedAt  DateTime?
+
+  @@index([userId])
+  @@index([type])
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum TransactionType {
+  VERIFICATION_FEE
+  PREMIUM_SUBSCRIPTION
+  PREMIUM_UPGRADE
+  SECURITY_DEPOSIT
+  SECURITY_DEPOSIT_REFUND
+  DISPUTE_FEE
+  FEATURED_LISTING
+  BOOST_OFFER
+  BULK_SWAP_ACCESS
+  REFERRAL_BONUS
+  WITHDRAWAL
+}
+
+enum TransactionStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  REFUNDED
+  CANCELLED
+}
+
+// ============================================
+// SAVED LOCATIONS
+// ============================================
+
+model SavedLocation {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  userId String @db.ObjectId
+  user   User   @relation("SavedLocations", fields: [userId], references: [id], onDelete: Cascade)
+
+  name      String
+  address   String
+  latitude  Float
+  longitude Float
+  city      String
+  state     String?
+  country   String
+  placeId   String?
+
+  isPrimary Boolean @default(false)
+  isPublic  Boolean @default(true)
+  category  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+// ============================================
+// BLOCKED USERS
+// ============================================
+
+model BlockedUser {
+  id        String @id @default(auto()) @map("_id") @db.ObjectId
+  blockerId String @db.ObjectId
+  blocker   User   @relation("BlockedBy", fields: [blockerId], references: [id], onDelete: Cascade)
+  blockedId String @db.ObjectId
+  blocked   User   @relation("Blocking", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  reason    String?
+  createdAt DateTime @default(now())
+
+  @@unique([blockerId, blockedId])
+  @@index([blockerId])
+  @@index([blockedId])
+}
+
+// ============================================
+// EXCHANGE RATE HISTORY
+// ============================================
+
+model ExchangeRateSnapshot {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+
+  fromCurrency String
+  toCurrency   String
+  rate         Float // Changed from Decimal to Float
+  source       String @default("ECB")
+
+  createdAt DateTime @default(now())
+
+  @@index([fromCurrency, toCurrency, createdAt])
+}
+
+// ============================================
+// REFERRAL SYSTEM
+// ============================================
+
+model Referral {
+  id         String @id @default(auto()) @map("_id") @db.ObjectId
+  referrerId String @db.ObjectId
+  referrer   User   @relation("ReferralsMade", fields: [referrerId], references: [id])
+  referredId String @db.ObjectId
+  referred   User   @relation("ReferralsReceived", fields: [referredId], references: [id])
+
+  code   String         @unique
+  status ReferralStatus @default(PENDING)
+
+  // Rewards
+  referrerReward Float? // Changed from Decimal to Float
+  referredReward Float? // Changed from Decimal to Float
+  rewardPaidAt   DateTime?
+
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  @@index([referrerId])
+  @@index([referredId])
+}
+
+enum ReferralStatus {
+  PENDING
+  COMPLETED
+  REWARDED
+  EXPIRED
+}
+
+// ============================================
+// FAVORITES
+// ============================================
+
+model FavoriteUser {
+  id         String @id @default(auto()) @map("_id") @db.ObjectId
+  userId     String @db.ObjectId
+  user       User   @relation("Favorites", fields: [userId], references: [id], onDelete: Cascade)
+  favoriteId String @db.ObjectId
+  favorite   User   @relation("FavoritedBy", fields: [favoriteId], references: [id], onDelete: Cascade)
+
+  notes String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, favoriteId])
+  @@index([userId])
+}
+
+// ============================================
+// SECURITY DEPOSITS
+// ============================================
+
+model SecurityDeposit {
+  id     String  @id @default(auto()) @map("_id") @db.ObjectId
+  userId String  @db.ObjectId
+  user   User    @relation("SecurityDeposits", fields: [userId], references: [id])
+  swapId String? @unique @db.ObjectId
+
+  amount   Float // Changed from Decimal to Float
+  currency String        @default("USD")
+  status   DepositStatus @default(HELD)
+
+  heldAt         DateTime  @default(now())
+  releasedAt     DateTime?
+  releasedReason String?
+
+  @@index([userId])
+  @@index([status])
+}
+
+enum DepositStatus {
+  HELD
+  RELEASED
+  FORFEITED
+}
+
+// ============================================
+// PUSH NOTIFICATION TOKENS
+// ============================================
+
+model PushToken {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  userId String @db.ObjectId
+  user   User   @relation("PushTokens", fields: [userId], references: [id], onDelete: Cascade)
+
+  token    String  @unique
+  platform String
+  deviceId String?
+  isActive Boolean @default(true)
+
+  createdAt  DateTime @default(now())
+  lastUsedAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([platform])
+}
+
+// ============================================
+// ACTIVITY LOG
+// ============================================
+
+model ActivityLog {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  userId String @db.ObjectId
+  user   User   @relation("Activities", fields: [userId], references: [id], onDelete: Cascade)
+
+  action      ActivityType
+  description String
+  metadata    Json?
+  ipAddress   String?
+  userAgent   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([action])
+}
+
+enum ActivityType {
+  LOGIN
+  LOGOUT
+  OFFER_CREATED
+  OFFER_UPDATED
+  OFFER_DELETED
+  SWAP_INITIATED
+  SWAP_COMPLETED
+  SWAP_CANCELLED
+  PROFILE_UPDATED
+  VERIFICATION_SUBMITTED
+  RATING_GIVEN
+  DISPUTE_FILED
+  PASSWORD_CHANGED
+  PASSWORD_RESET_REQUESTED
+  PASSWORD_RESET_COMPLETED
+  EMAIL_VERIFIED
+  TWO_FACTOR_ENABLED
+  TWO_FACTOR_DISABLED
+  LOCATION_SHARED
+  SECURITY_ALERT
+}
+
+// ============================================
+// ADMIN LOG
+// ============================================
+
+model AdminLog {
+  id      String @id @default(auto()) @map("_id") @db.ObjectId
+  adminId String @db.ObjectId
+  admin   User   @relation(fields: [adminId], references: [id])
+
+  action     AdminAction
+  targetType String
+  targetId   String      @db.ObjectId
+  details    String?
+  changes    Json?
+  ipAddress  String?
+
+  createdAt DateTime @default(now())
+
+  @@index([adminId])
+  @@index([targetType, targetId])
+  @@index([createdAt])
+}
+
+enum AdminAction {
+  USER_BANNED
+  USER_UNBANNED
+  USER_VERIFIED
+  USER_REJECTED
+  DISPUTE_RESOLVED
+  CONTENT_MODERATED
+  ROLE_CHANGED
+  SYSTEM_CONFIG_UPDATED
+  BULK_ACTION
+}
+
+// ============================================
+// SYSTEM CONFIG
+// ============================================
+
+model SystemConfig {
+  id          String  @id @default(auto()) @map("_id") @db.ObjectId
+  key         String  @unique
+  value       String
+  dataType    String  @default("string")
+  description String?
+  category    String?
+  isPublic    Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([category])
+}
+
+// ============================================
+// APP ANALYTICS
+// ============================================
+
+model Analytics {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+
+  date     DateTime @default(now())
+  metric   String
+  value    Float
+  metadata Json?
+
+  @@index([date, metric])
+}

@@ -1,0 +1,628 @@
+currency-exchange-platform/
+│
+├── backend/                                # Node.js Backend
+│   ├── prisma/
+│   │   ├── schema.prisma
+│   │   └── seed.ts
+│   │
+│   ├── src/
+│   │   ├── app.ts
+│   │   ├── server.ts
+│   │   │
+│   │   ├── config/
+│   │   │   ├── database.ts
+│   │   │   ├── env.ts
+│   │   │   ├── cors.ts
+│   │   │   ├── redis.ts
+│   │   │   ├── cloudinary.ts
+│   │   │   ├── better-auth.ts
+│   │   │   └── socket.ts
+│   │   │
+│   │   ├── middleware/
+│   │   │   ├── auth.middleware.ts
+│   │   │   ├── role.middleware.ts
+│   │   │   ├── validate.middleware.ts
+│   │   │   ├── error.middleware.ts
+│   │   │   ├── rateLimit.middleware.ts
+│   │   │   ├── upload.middleware.ts
+│   │   │   └── logger.middleware.ts
+│   │   │
+│   │   ├── routes/
+│   │   │   ├── index.ts
+│   │   │   ├── auth.routes.ts
+│   │   │   ├── user.routes.ts
+│   │   │   ├── offer.routes.ts
+│   │   │   ├── swap.routes.ts
+│   │   │   ├── message.routes.ts
+│   │   │   ├── rating.routes.ts
+│   │   │   ├── dispute.routes.ts
+│   │   │   ├── notification.routes.ts
+│   │   │   ├── transaction.routes.ts
+│   │   │   ├── location.routes.ts
+│   │   │   ├── referral.routes.ts
+│   │   │   ├── analytics.routes.ts
+│   │   │   ├── admin.routes.ts
+│   │   │   └── webhook.routes.ts
+│   │   │
+│   │   ├── controllers/
+│   │   │   ├── auth.controller.ts
+│   │   │   ├── user.controller.ts
+│   │   │   ├── offer.controller.ts
+│   │   │   ├── swap.controller.ts
+│   │   │   ├── message.controller.ts
+│   │   │   ├── rating.controller.ts
+│   │   │   ├── dispute.controller.ts
+│   │   │   ├── notification.controller.ts
+│   │   │   ├── transaction.controller.ts
+│   │   │   ├── location.controller.ts
+│   │   │   ├── referral.controller.ts
+│   │   │   ├── analytics.controller.ts
+│   │   │   └── admin.controller.ts
+│   │   │
+│   │   ├── services/
+│   │   │   ├── auth.service.ts
+│   │   │   ├── user.service.ts
+│   │   │   ├── offer.service.ts
+│   │   │   ├── swap.service.ts
+│   │   │   ├── matching.service.ts
+│   │   │   ├── message.service.ts
+│   │   │   ├── rating.service.ts
+│   │   │   ├── dispute.service.ts
+│   │   │   ├── notification.service.ts
+│   │   │   ├── transaction.service.ts
+│   │   │   ├── location.service.ts
+│   │   │   ├── geolocation.service.ts
+│   │   │   ├── exchangeRate.service.ts
+│   │   │   ├── verification.service.ts
+│   │   │   ├── cloudinary.service.ts
+│   │   │   ├── email.service.ts
+│   │   │   ├── sms.service.ts
+│   │   │   ├── push.service.ts
+│   │   │   ├── payment.service.ts
+│   │   │   ├── referral.service.ts
+│   │   │   └── analytics.service.ts
+│   │   │
+│   │   ├── repositories/
+│   │   │   ├── base.repository.ts
+│   │   │   ├── user.repository.ts
+│   │   │   ├── offer.repository.ts
+│   │   │   ├── swap.repository.ts
+│   │   │   ├── message.repository.ts
+│   │   │   ├── rating.repository.ts
+│   │   │   ├── dispute.repository.ts
+│   │   │   ├── notification.repository.ts
+│   │   │   ├── transaction.repository.ts
+│   │   │   └── referral.repository.ts
+│   │   │
+│   │   ├── validators/
+│   │   │   ├── auth.validator.ts
+│   │   │   ├── user.validator.ts
+│   │   │   ├── offer.validator.ts
+│   │   │   ├── swap.validator.ts
+│   │   │   ├── message.validator.ts
+│   │   │   ├── rating.validator.ts
+│   │   │   ├── dispute.validator.ts
+│   │   │   └── common.validator.ts
+│   │   │
+│   │   ├── utils/
+│   │   │   ├── jwt.util.ts
+│   │   │   ├── logger.util.ts
+│   │   │   ├── response.util.ts
+│   │   │   ├── error.util.ts
+│   │   │   ├── pagination.util.ts
+│   │   │   ├── distance.util.ts
+│   │   │   ├── date.util.ts
+│   │   │   ├── sanitize.util.ts
+│   │   │   └── helpers.util.ts
+│   │   │
+│   │   ├── jobs/
+│   │   │   ├── queue.ts
+│   │   │   ├── processors/
+│   │   │   │   ├── email.processor.ts
+│   │   │   │   ├── notification.processor.ts
+│   │   │   │   ├── exchangeRate.processor.ts
+│   │   │   │   ├── expiredOffer.processor.ts
+│   │   │   │   ├── swapReminder.processor.ts
+│   │   │   │   └── analytics.processor.ts
+│   │   │   └── schedulers/
+│   │   │       ├── dailyCleanup.scheduler.ts
+│   │   │       ├── rateUpdate.scheduler.ts
+│   │   │       └── premiumExpiry.scheduler.ts
+│   │   │
+│   │   ├── websocket/
+│   │   │   ├── socket.ts
+│   │   │   ├── handlers/
+│   │   │   │   ├── message.handler.ts
+│   │   │   │   ├── notification.handler.ts
+│   │   │   │   ├── swap.handler.ts
+│   │   │   │   └── location.handler.ts
+│   │   │   └── middleware/
+│   │   │       └── auth.socket.middleware.ts
+│   │   │
+│   │   ├── cron/
+│   │   │   ├── index.ts
+│   │   │   ├── cleanup.cron.ts
+│   │   │   ├── exchangeRate.cron.ts
+│   │   │   ├── premiumExpiry.cron.ts
+│   │   │   └── analytics.cron.ts
+│   │   │
+│   │   └── types/
+│   │       ├── index.d.ts
+│   │       ├── express.d.ts
+│   │       ├── auth.types.ts
+│   │       ├── user.types.ts
+│   │       ├── offer.types.ts
+│   │       ├── swap.types.ts
+│   │       └── common.types.ts
+│   │
+│   ├── tests/
+│   │   ├── unit/
+│   │   │   ├── services/
+│   │   │   ├── controllers/
+│   │   │   └── utils/
+│   │   ├── integration/
+│   │   │   ├── auth.test.ts
+│   │   │   ├── offer.test.ts
+│   │   │   ├── swap.test.ts
+│   │   │   └── matching.test.ts
+│   │   └── e2e/
+│   │       └── swap-flow.test.ts
+│   │
+│   ├── scripts/
+│   │   ├── generate-keys.ts
+│   │   ├── migrate.ts
+│   │   └── seed-currencies.ts
+│   │
+│   ├── logs/
+│   │   ├── error.log
+│   │   ├── combined.log
+│   │   └── access.log
+│   │
+│   ├── uploads/
+│   │   └── .gitkeep
+│   │
+│   ├── .env.example
+│   ├── .env
+│   ├── .env.test
+│   ├── .gitignore
+│   ├── .eslintrc.json
+│   ├── .prettierrc
+│   ├── tsconfig.json
+│   ├── package.json
+│   ├── package-lock.json
+│   ├── ecosystem.config.js
+│   └── README.md
+│
+├── web/                                    # Next.js Web App
+│   ├── app/
+│   │   ├── layout.tsx
+│   │   ├── page.tsx
+│   │   ├── globals.css
+│   │   ├── providers.tsx
+│   │   │
+│   │   ├── (auth)/
+│   │   │   ├── layout.tsx
+│   │   │   ├── login/
+│   │   │   │   └── page.tsx
+│   │   │   ├── register/
+│   │   │   │   └── page.tsx
+│   │   │   ├── verify-email/
+│   │   │   │   └── page.tsx
+│   │   │   └── forgot-password/
+│   │   │       └── page.tsx
+│   │   │
+│   │   ├── (dashboard)/
+│   │   │   ├── layout.tsx
+│   │   │   ├── dashboard/
+│   │   │   │   └── page.tsx
+│   │   │   ├── offers/
+│   │   │   │   ├── page.tsx
+│   │   │   │   ├── create/
+│   │   │   │   │   └── page.tsx
+│   │   │   │   └── [id]/
+│   │   │   │       ├── page.tsx
+│   │   │   │       └── edit/
+│   │   │   │           └── page.tsx
+│   │   │   ├── swaps/
+│   │   │   │   ├── page.tsx
+│   │   │   │   └── [id]/
+│   │   │   │       └── page.tsx
+│   │   │   ├── messages/
+│   │   │   │   ├── page.tsx
+│   │   │   │   └── [id]/
+│   │   │   │       └── page.tsx
+│   │   │   ├── profile/
+│   │   │   │   ├── page.tsx
+│   │   │   │   ├── edit/
+│   │   │   │   │   └── page.tsx
+│   │   │   │   ├── verification/
+│   │   │   │   │   └── page.tsx
+│   │   │   │   └── settings/
+│   │   │   │       └── page.tsx
+│   │   │   ├── transactions/
+│   │   │   │   └── page.tsx
+│   │   │   ├── referrals/
+│   │   │   │   └── page.tsx
+│   │   │   └── premium/
+│   │   │       └── page.tsx
+│   │   │
+│   │   ├── (admin)/
+│   │   │   ├── layout.tsx
+│   │   │   ├── admin/
+│   │   │   │   ├── page.tsx
+│   │   │   │   ├── users/
+│   │   │   │   │   ├── page.tsx
+│   │   │   │   │   └── [id]/
+│   │   │   │   │       └── page.tsx
+│   │   │   │   ├── swaps/
+│   │   │   │   │   ├── page.tsx
+│   │   │   │   │   └── [id]/
+│   │   │   │   │       └── page.tsx
+│   │   │   │   ├── disputes/
+│   │   │   │   │   ├── page.tsx
+│   │   │   │   │   └── [id]/
+│   │   │   │   │       └── page.tsx
+│   │   │   │   ├── verifications/
+│   │   │   │   │   ├── page.tsx
+│   │   │   │   │   └── [id]/
+│   │   │   │   │       └── page.tsx
+│   │   │   │   ├── transactions/
+│   │   │   │   │   └── page.tsx
+│   │   │   │   ├── analytics/
+│   │   │   │   │   └── page.tsx
+│   │   │   │   ├── settings/
+│   │   │   │   │   └── page.tsx
+│   │   │   │   └── staff/
+│   │   │   │       ├── page.tsx
+│   │   │   │       └── [id]/
+│   │   │   │           └── page.tsx
+│   │   │
+│   │   └── api/
+│   │       └── auth/
+│   │           └── [...all]/
+│   │               └── route.ts
+│   │
+│   ├── components/
+│   │   ├── ui/                          # shadcn components
+│   │   │   ├── button.tsx
+│   │   │   ├── card.tsx
+│   │   │   ├── input.tsx
+│   │   │   ├── select.tsx
+│   │   │   ├── dialog.tsx
+│   │   │   ├── dropdown-menu.tsx
+│   │   │   ├── avatar.tsx
+│   │   │   ├── badge.tsx
+│   │   │   ├── tabs.tsx
+│   │   │   ├── table.tsx
+│   │   │   ├── toast.tsx
+│   │   │   ├── alert.tsx
+│   │   │   ├── skeleton.tsx
+│   │   │   └── ...
+│   │   │
+│   │   ├── auth/
+│   │   │   ├── LoginForm.tsx
+│   │   │   ├── RegisterForm.tsx
+│   │   │   ├── ForgotPasswordForm.tsx
+│   │   │   └── VerifyEmailForm.tsx
+│   │   │
+│   │   ├── offers/
+│   │   │   ├── OfferCard.tsx
+│   │   │   ├── OfferList.tsx
+│   │   │   ├── CreateOfferForm.tsx
+│   │   │   ├── OfferFilters.tsx
+│   │   │   └── OfferMap.tsx
+│   │   │
+│   │   ├── swaps/
+│   │   │   ├── SwapCard.tsx
+│   │   │   ├── SwapList.tsx
+│   │   │   ├── SwapDetails.tsx
+│   │   │   ├── SwapConfirmation.tsx
+│   │   │   └── SwapTimeline.tsx
+│   │   │
+│   │   ├── messages/
+│   │   │   ├── MessageList.tsx
+│   │   │   ├── MessageInput.tsx
+│   │   │   ├── ChatWindow.tsx
+│   │   │   └── ConversationList.tsx
+│   │   │
+│   │   ├── profile/
+│   │   │   ├── ProfileCard.tsx
+│   │   │   ├── ProfileStats.tsx
+│   │   │   ├── EditProfileForm.tsx
+│   │   │   ├── VerificationForm.tsx
+│   │   │   └── RatingDisplay.tsx
+│   │   │
+│   │   ├── admin/
+│   │   │   ├── AdminSidebar.tsx
+│   │   │   ├── AdminHeader.tsx
+│   │   │   ├── UserTable.tsx
+│   │   │   ├── DisputeTable.tsx
+│   │   │   ├── AnalyticsCharts.tsx
+│   │   │   └── VerificationQueue.tsx
+│   │   │
+│   │   ├── shared/
+│   │   │   ├── Navbar.tsx
+│   │   │   ├── Sidebar.tsx
+│   │   │   ├── Footer.tsx
+│   │   │   ├── LoadingSpinner.tsx
+│   │   │   ├── EmptyState.tsx
+│   │   │   ├── ErrorBoundary.tsx
+│   │   │   ├── SearchBar.tsx
+│   │   │   ├── Pagination.tsx
+│   │   │   ├── FileUpload.tsx
+│   │   │   ├── LocationPicker.tsx
+│   │   │   ├── CurrencySelector.tsx
+│   │   │   └── ThemeToggle.tsx
+│   │   │
+│   │   └── layouts/
+│   │       ├── DashboardLayout.tsx
+│   │       ├── AdminLayout.tsx
+│   │       └── AuthLayout.tsx
+│   │
+│   ├── lib/
+│   │   ├── utils.ts
+│   │   ├── api.ts
+│   │   ├── auth.ts
+│   │   ├── constants.ts
+│   │   ├── validators.ts
+│   │   └── format.ts
+│   │
+│   ├── hooks/
+│   │   ├── use-auth.ts
+│   │   ├── use-offers.ts
+│   │   ├── use-swaps.ts
+│   │   ├── use-messages.ts
+│   │   ├── use-notifications.ts
+│   │   ├── use-location.ts
+│   │   ├── use-socket.ts
+│   │   ├── use-theme.ts
+│   │   └── use-debounce.ts
+│   │
+│   ├── store/
+│   │   ├── index.ts
+│   │   ├── slices/
+│   │   │   ├── authSlice.ts
+│   │   │   ├── userSlice.ts
+│   │   │   ├── offerSlice.ts
+│   │   │   ├── swapSlice.ts
+│   │   │   ├── messageSlice.ts
+│   │   │   └── notificationSlice.ts
+│   │   └── middleware/
+│   │       └── api.middleware.ts
+│   │
+│   ├── services/
+│   │   ├── api/
+│   │   │   ├── auth.api.ts
+│   │   │   ├── user.api.ts
+│   │   │   ├── offer.api.ts
+│   │   │   ├── swap.api.ts
+│   │   │   ├── message.api.ts
+│   │   │   ├── rating.api.ts
+│   │   │   ├── notification.api.ts
+│   │   │   └── admin.api.ts
+│   │   ├── socket.service.ts
+│   │   └── storage.service.ts
+│   │
+│   ├── styles/
+│   │   ├── theme.ts
+│   │   └── globals.css
+│   │
+│   ├── types/
+│   │   ├── index.ts
+│   │   ├── auth.types.ts
+│   │   ├── user.types.ts
+│   │   ├── offer.types.ts
+│   │   ├── swap.types.ts
+│   │   └── api.types.ts
+│   │
+│   ├── config/
+│   │   ├── site.ts
+│   │   ├── navigation.ts
+│   │   └── env.ts
+│   │
+│   ├── public/
+│   │   ├── icons/
+│   │   ├── images/
+│   │   └── fonts/
+│   │
+│   ├── .env.local
+│   ├── .env.example
+│   ├── .gitignore
+│   ├── .eslintrc.json
+│   ├── .prettierrc
+│   ├── next.config.js
+│   ├── tsconfig.json
+│   ├── package.json
+│   ├── package-lock.json
+│   ├── components.json
+│   └── README.md
+│
+└── mobile/                                 # React Native App
+    ├── src/
+    │   ├── navigation/
+    │   │   ├── AppNavigator.tsx
+    │   │   ├── AuthNavigator.tsx
+    │   │   ├── MainNavigator.tsx
+    │   │   ├── AdminNavigator.tsx
+    │   │   └── types.ts
+    │   │
+    │   ├── screens/
+    │   │   ├── auth/
+    │   │   │   ├── LoginScreen.tsx
+    │   │   │   ├── RegisterScreen.tsx
+    │   │   │   ├── ForgotPasswordScreen.tsx
+    │   │   │   └── VerifyEmailScreen.tsx
+    │   │   │
+    │   │   ├── home/
+    │   │   │   ├── HomeScreen.tsx
+    │   │   │   └── ExploreScreen.tsx
+    │   │   │
+    │   │   ├── offers/
+    │   │   │   ├── OffersScreen.tsx
+    │   │   │   ├── CreateOfferScreen.tsx
+    │   │   │   ├── OfferDetailsScreen.tsx
+    │   │   │   └── EditOfferScreen.tsx
+    │   │   │
+    │   │   ├── swaps/
+    │   │   │   ├── SwapsScreen.tsx
+    │   │   │   ├── SwapDetailsScreen.tsx
+    │   │   │   └── SwapConfirmationScreen.tsx
+    │   │   │
+    │   │   ├── messages/
+    │   │   │   ├── MessagesScreen.tsx
+    │   │   │   └── ChatScreen.tsx
+    │   │   │
+    │   │   ├── profile/
+    │   │   │   ├── ProfileScreen.tsx
+    │   │   │   ├── EditProfileScreen.tsx
+    │   │   │   ├── VerificationScreen.tsx
+    │   │   │   └── SettingsScreen.tsx
+    │   │   │
+    │   │   ├── transactions/
+    │   │   │   └── TransactionsScreen.tsx
+    │   │   │
+    │   │   ├── referrals/
+    │   │   │   └── ReferralsScreen.tsx
+    │   │   │
+    │   │   ├── notifications/
+    │   │   │   └── NotificationsScreen.tsx
+    │   │   │
+    │   │   └── admin/
+    │   │       ├── AdminDashboardScreen.tsx
+    │   │       ├── AdminUsersScreen.tsx
+    │   │       ├── AdminSwapsScreen.tsx
+    │   │       ├── AdminDisputesScreen.tsx
+    │   │       ├── AdminVerificationsScreen.tsx
+    │   │       └── AdminSettingsScreen.tsx
+    │   │
+    │   ├── components/
+    │   │   ├── auth/
+    │   │   │   ├── LoginForm.tsx
+    │   │   │   ├── RegisterForm.tsx
+    │   │   │   └── SocialAuthButtons.tsx
+    │   │   │
+    │   │   ├── offers/
+    │   │   │   ├── OfferCard.tsx
+    │   │   │   ├── OfferList.tsx
+    │   │   │   ├── CreateOfferForm.tsx
+    │   │   │   └── OfferMap.tsx
+    │   │   │
+    │   │   ├── swaps/
+    │   │   │   ├── SwapCard.tsx
+    │   │   │   ├── SwapList.tsx
+    │   │   │   ├── SwapTimeline.tsx
+    │   │   │   └── SwapActions.tsx
+    │   │   │
+    │   │   ├── messages/
+    │   │   │   ├── MessageBubble.tsx
+    │   │   │   ├── MessageList.tsx
+    │   │   │   └── MessageInput.tsx
+    │   │   │
+    │   │   ├── profile/
+    │   │   │   ├── ProfileHeader.tsx
+    │   │   │   ├── ProfileStats.tsx
+    │   │   │   ├── RatingDisplay.tsx
+    │   │   │   └── VerificationBadge.tsx
+    │   │   │
+    │   │   ├── shared/
+    │   │   │   ├── Button.tsx
+    │   │   │   ├── Input.tsx
+    │   │   │   ├── Card.tsx
+    │   │   │   ├── Avatar.tsx
+    │   │   │   ├── Badge.tsx
+    │   │   │   ├── LoadingSpinner.tsx
+    │   │   │   ├── EmptyState.tsx
+    │   │   │   ├── ErrorMessage.tsx
+    │   │   │   ├── SearchBar.tsx
+    │   │   │   ├── LocationPicker.tsx
+    │   │   │   ├── CurrencySelector.tsx
+    │   │   │   ├── ImageUploader.tsx
+    │   │   │   └── BottomSheet.tsx
+    │   │   │
+    │   │   └── layouts/
+    │   │       ├── Screen.tsx
+    │   │       ├── KeyboardAvoidingView.tsx
+    │   │       └── SafeAreaView.tsx
+    │   │
+    │   ├── hooks/
+    │   │   ├── useAuth.ts
+    │   │   ├── useOffers.ts
+    │   │   ├── useSwaps.ts
+    │   │   ├── useMessages.ts
+    │   │   ├── useNotifications.ts
+    │   │   ├── useLocation.ts
+    │   │   ├── useSocket.ts
+    │   │   ├── useTheme.ts
+    │   │   └── useKeyboard.ts
+    │   │
+    │   ├── store/
+    │   │   ├── index.ts
+    │   │   ├── slices/
+    │   │   │   ├── authSlice.ts
+    │   │   │   ├── userSlice.ts
+    │   │   │   ├── offerSlice.ts
+    │   │   │   ├── swapSlice.ts
+    │   │   │   ├── messageSlice.ts
+    │   │   │   └── notificationSlice.ts
+    │   │   └── middleware/
+    │   │       └── api.middleware.ts
+    │   │
+    │   ├── services/
+    │   │   ├── api/
+    │   │   │   ├── client.ts
+    │   │   │   ├── auth.api.ts
+    │   │   │   ├── user.api.ts
+    │   │   │   ├── offer.api.ts
+    │   │   │   ├── swap.api.ts
+    │   │   │   ├── message.api.ts
+    │   │   │   └── notification.api.ts
+    │   │   ├── socket.service.ts
+    │   │   ├── storage.service.ts
+    │   │   ├── location.service.ts
+    │   │   ├── notification.service.ts
+    │   │   └── permissions.service.ts
+    │   │
+    │   ├── utils/
+    │   │   ├── format.ts
+    │   │   ├── validators.ts
+    │   │   ├── distance.ts
+    │   │   ├── date.ts
+    │   │   └── helpers.ts
+    │   │
+    │   ├── theme/
+    │   │   ├── index.ts
+    │   │   ├── colors.ts
+    │   │   ├── spacing.ts
+    │   │   ├── typography.ts
+    │   │   └── shadows.ts
+    │   │
+    │   ├── types/
+    │   │   ├── index.ts
+    │   │   ├── navigation.types.ts
+    │   │   ├── auth.types.ts
+    │   │   ├── user.types.ts
+    │   │   ├── offer.types.ts
+    │   │   └── swap.types.ts
+    │   │
+    │   └── config/
+    │       ├── constants.ts
+    │       ├── env.ts
+    │       └── permissions.ts
+    │
+    ├── assets/
+    │   ├── images/
+    │   ├── icons/
+    │   └── fonts/
+    │
+    ├── .env.example
+    ├── .env
+    ├── .gitignore
+    ├── .eslintrc.js
+    ├── .prettierrc
+    ├── app.json
+    ├── babel.config.js
+    ├── metro.config.js
+    ├── tsconfig.json
+    ├── package.json
+    ├── package-lock.json
+    └── README.md
