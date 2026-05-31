@@ -1,8 +1,10 @@
 {
   "compilerOptions": {
+    "ignoreDeprecations": "6.0",
     "target": "ES2022",
     "module": "ESNext",
     "lib": ["ES2022"],
+    "rootDir": "./src",
     "outDir": "./dist",
     "removeComments": true,
     "strict": true,

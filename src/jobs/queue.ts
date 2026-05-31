@@ -1,30 +1,45 @@
-import { Queue, Worker, QueueScheduler } from 'bullmq';
+import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 import { config } from '@/config/env';
 import logger from '@/utils/logger.util';
 
-// Create Redis connection
-const connection = new Redis({
-  host: config.redis.host,
-  port: config.redis.port,
-  password: config.redis.password,
-  maxRetriesPerRequest: null,
-});
+// ── Shared BullMQ Redis connection ────────────────────────
+// Uses REDIS_URL (rediss://) when set — required for Upstash TLS.
+// maxRetriesPerRequest MUST be null for BullMQ.
+const connectionOptions = config.redis.url
+  ? {
+      // Parse from URL — ioredis handles rediss:// TLS automatically
+      lazyConnect: false,
+      maxRetriesPerRequest: null as null,
+      enableReadyCheck: false,
+      tls: config.redis.url.startsWith('rediss://') ? {} : undefined,
+    }
+  : {
+      host: config.redis.host,
+      port: config.redis.port,
+      password: config.redis.password || undefined,
+      db: config.redis.db,
+      maxRetriesPerRequest: null as null,
+      enableReadyCheck: false,
+    };
 
-// Queue definitions
-export const emailQueue = new Queue('email', { connection });
-export const notificationQueue = new Queue('notification', { connection });
-export const exchangeRateQueue = new Queue('exchange-rate', { connection });
-export const expiredOfferQueue = new Queue('expired-offer', { connection });
-export const swapReminderQueue = new Queue('swap-reminder', { connection });
-export const analyticsQueue = new Queue('analytics', { connection });
+export const connection = config.redis.url
+  ? new Redis(config.redis.url, connectionOptions as object)
+  : new Redis(connectionOptions as object);
 
-// Queue schedulers (for delayed/repeated jobs)
-export const emailScheduler = new QueueScheduler('email', { connection });
-export const notificationScheduler = new QueueScheduler('notification', { connection });
-export const exchangeRateScheduler = new QueueScheduler('exchange-rate', { connection });
+connection.on('error', (e) => logger.warn('BullMQ Redis error:', e.message));
 
-// Job types
+// ── Queue definitions ─────────────────────────────────────
+const queueOpts = { connection };
+
+export const emailQueue = new Queue('email', queueOpts);
+export const notificationQueue = new Queue('notification', queueOpts);
+export const exchangeRateQueue = new Queue('exchange-rate', queueOpts);
+export const expiredOfferQueue = new Queue('expired-offer', queueOpts);
+export const swapReminderQueue = new Queue('swap-reminder', queueOpts);
+export const analyticsQueue = new Queue('analytics', queueOpts);
+
+// ── Job type enum ─────────────────────────────────────────
 export enum JobType {
   SEND_EMAIL = 'send-email',
   SEND_NOTIFICATION = 'send-notification',
@@ -36,113 +51,70 @@ export enum JobType {
   PROCESS_VERIFICATION = 'process-verification',
 }
 
-// Helper functions to add jobs
-export async function addEmailJob(data: any, options?: any) {
+// ── Queue error listeners ─────────────────────────────────
+emailQueue.on('error', (e) => logger.error('Email queue error:', e.message));
+notificationQueue.on('error', (e) => logger.error('Notification queue error:', e.message));
+
+// ── Job helpers ───────────────────────────────────────────
+export async function addEmailJob(data: unknown, options?: object) {
   return emailQueue.add(JobType.SEND_EMAIL, data, {
     attempts: 3,
-    backoff: {
-      type: 'exponential',
-      delay: 2000,
-    },
+    backoff: { type: 'exponential', delay: 2000 },
     ...options,
   });
 }
 
-export async function addNotificationJob(data: any, options?: any) {
+export async function addNotificationJob(data: unknown, options?: object) {
   return notificationQueue.add(JobType.SEND_NOTIFICATION, data, {
     attempts: 3,
-    backoff: {
-      type: 'exponential',
-      delay: 1000,
-    },
+    backoff: { type: 'exponential', delay: 1000 },
     ...options,
   });
 }
 
-export async function addExchangeRateJob(data?: any) {
-  return exchangeRateQueue.add(
-    JobType.UPDATE_EXCHANGE_RATES,
-    data || {},
-    {
-      repeat: {
-        pattern: '0 */6 * * *', // Every 6 hours
-      },
-    }
-  );
+export async function addExchangeRateJob(data?: unknown) {
+  return exchangeRateQueue.add(JobType.UPDATE_EXCHANGE_RATES, data || {}, {
+    repeat: { pattern: '0 */6 * * *' },
+  });
 }
 
 export async function addExpiredOfferJob() {
-  return expiredOfferQueue.add(
-    JobType.EXPIRE_OFFERS,
-    {},
-    {
-      repeat: {
-        pattern: '0 * * * *', // Every hour
-      },
-    }
-  );
+  return expiredOfferQueue.add(JobType.EXPIRE_OFFERS, {}, { repeat: { pattern: '0 * * * *' } });
 }
 
-export async function addSwapReminderJob(data: any, delay: number) {
-  return swapReminderQueue.add(JobType.SEND_SWAP_REMINDER, data, {
-    delay, // Delay in milliseconds
-  });
+export async function addSwapReminderJob(data: unknown, delay: number) {
+  return swapReminderQueue.add(JobType.SEND_SWAP_REMINDER, data, { delay });
 }
 
 export async function addAnalyticsJob() {
-  return analyticsQueue.add(
-    JobType.CALCULATE_ANALYTICS,
-    {},
-    {
-      repeat: {
-        pattern: '0 0 * * *', // Daily at midnight
-      },
-    }
-  );
+  return analyticsQueue.add(JobType.CALCULATE_ANALYTICS, {}, { repeat: { pattern: '0 0 * * *' } });
 }
 
-// Initialize all queues (call this on startup)
+// ── Startup initializer ───────────────────────────────────
 export async function initializeQueues() {
   try {
     logger.info('Initializing job queues...');
-
-    // Set up repeating jobs
-    await addExchangeRateJob();
-    await addExpiredOfferJob();
-    await addAnalyticsJob();
-
+    await Promise.all([addExchangeRateJob(), addExpiredOfferJob(), addAnalyticsJob()]);
     logger.info('✅ Job queues initialized');
   } catch (error) {
-    logger.error('❌ Failed to initialize queues:', error);
-    throw error;
+    // Non-fatal — queues are a background feature
+    logger.warn('⚠️ Job queues could not be initialized (non-fatal):', (error as Error).message);
   }
 }
 
-// Graceful shutdown
+// ── Graceful shutdown ─────────────────────────────────────
 export async function closeQueues() {
-  await Promise.all([
+  await Promise.allSettled([
     emailQueue.close(),
     notificationQueue.close(),
     exchangeRateQueue.close(),
     expiredOfferQueue.close(),
     swapReminderQueue.close(),
     analyticsQueue.close(),
-    emailScheduler.close(),
-    notificationScheduler.close(),
-    exchangeRateScheduler.close(),
   ]);
   await connection.quit();
   logger.info('Queues closed');
 }
 
-// Queue event listeners
-emailQueue.on('error', (error) => {
-  logger.error('Email queue error:', error);
-});
-
-notificationQueue.on('error', (error) => {
-  logger.error('Notification queue error:', error);
-});
-
-// Export connection for workers
+// Alias for processor imports
 export { connection as redisConnection };

@@ -5,7 +5,8 @@
 // Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
 
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  binaryTargets   = ["native", "windows"]
 }
 
 datasource db {
@@ -33,7 +34,7 @@ model User {
   twoFactorEnabled Boolean @default(false)
 
   // Profile
-  phone         String? @unique
+  phone         String?
   phoneVerified Boolean @default(false)
   bio           String?
 

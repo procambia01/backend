@@ -137,7 +137,7 @@ export class OfferService {
     // Calculate distance if location provided
     let offersWithDistance: OfferWithDistance[] = offers;
     if (latitude && longitude) {
-      offersWithDistance = offers.map(offer => ({
+      offersWithDistance = offers.map((offer) => ({
         ...offer,
         distance: DistanceUtil.calculateDistanceInKm(
           { latitude, longitude },
@@ -202,14 +202,14 @@ export class OfferService {
 
     // Filter by actual distance and add distance field
     const nearbyOffers = offers
-      .filter(offer =>
+      .filter((offer) =>
         DistanceUtil.isWithinRadius(
           { latitude, longitude },
           { latitude: offer.latitude, longitude: offer.longitude },
           radiusKm
         )
       )
-      .map(offer => ({
+      .map((offer) => ({
         ...offer,
         distance: DistanceUtil.calculateDistanceInKm(
           { latitude, longitude },
@@ -311,7 +311,7 @@ export class OfferService {
     const { page, perPage } = pagination;
     const skip = (page - 1) * perPage;
 
-    const matches = userOffers.flatMap(offer => [
+    const matches = userOffers.flatMap((offer) => [
       { haveCurrency: offer.wantCurrency, wantCurrency: offer.haveCurrency },
     ]);
 
@@ -333,6 +333,57 @@ export class OfferService {
               name: true,
               image: true,
               rating: true,
+            },
+          },
+        },
+      }),
+      prisma.swapOffer.count({ where }),
+    ]);
+
+    return {
+      data: offers,
+      meta: {
+        page,
+        perPage,
+        total,
+        totalPages: Math.ceil(total / perPage),
+        hasMore: page < Math.ceil(total / perPage),
+      },
+    };
+  }
+
+  /**
+   * Get offers belonging to a specific user (for /my endpoint)
+   */
+  async getUserOffers(userId: string, filters: any, pagination: any) {
+    const { page, perPage, sortBy, sortOrder } = pagination;
+    const skip = (page - 1) * perPage;
+
+    const where: any = { userId };
+
+    // Optional status filter from query param
+    if (filters.status) {
+      const statuses = (filters.status as string)
+        .split(',')
+        .map((s: string) => s.trim().toUpperCase());
+      where.status = { in: statuses };
+    }
+
+    const [offers, total] = await Promise.all([
+      prisma.swapOffer.findMany({
+        where,
+        skip,
+        take: perPage,
+        orderBy: { [sortBy || 'createdAt']: sortOrder || 'desc' },
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              image: true,
+              rating: true,
+              totalSwaps: true,
+              idVerified: true,
             },
           },
         },
@@ -597,21 +648,14 @@ export class OfferService {
       views: offer.viewCount,
       matches: offer.matchCount,
       swaps: swapsCount,
-      daysActive: Math.floor(
-        (Date.now() - offer.createdAt.getTime()) / (1000 * 60 * 60 * 24)
-      ),
+      daysActive: Math.floor((Date.now() - offer.createdAt.getTime()) / (1000 * 60 * 60 * 24)),
     };
   }
 
   /**
    * Report offer
    */
-  async reportOffer(
-    offerId: string,
-    userId: string,
-    reason: string,
-    description: string
-  ) {
+  async reportOffer(offerId: string, userId: string, reason: string, description: string) {
     // Log as admin action instead of using a Report model
     await prisma.adminLog.create({
       data: {

@@ -1,17 +1,17 @@
 import { Worker, Job } from 'bullmq';
 import { redisConnection } from '../queue';
 import logger from '@/utils/logger.util';
+import prisma from '@/config/database';
 
 export const analyticsWorker = new Worker(
   'analytics',
-  async (job: Job) => {
+  async (_job: Job) => {
     logger.info('Calculating daily analytics...');
 
     try {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
 
-      // Calculate metrics
       const [newUsers, activeUsers, swapsCompleted, offersCreated] = await Promise.all([
         prisma.user.count({
           where: { createdAt: { gte: today } },
@@ -31,35 +31,18 @@ export const analyticsWorker = new Worker(
         }),
       ]);
 
-      // Store analytics
       await Promise.all([
         prisma.analytics.create({
-          data: {
-            date: today,
-            metric: 'NEW_USERS',
-            value: newUsers,
-          },
+          data: { date: today, metric: 'NEW_USERS', value: newUsers },
         }),
         prisma.analytics.create({
-          data: {
-            date: today,
-            metric: 'ACTIVE_USERS',
-            value: activeUsers.length,
-          },
+          data: { date: today, metric: 'ACTIVE_USERS', value: activeUsers.length },
         }),
         prisma.analytics.create({
-          data: {
-            date: today,
-            metric: 'SWAPS_COMPLETED',
-            value: swapsCompleted,
-          },
+          data: { date: today, metric: 'SWAPS_COMPLETED', value: swapsCompleted },
         }),
         prisma.analytics.create({
-          data: {
-            date: today,
-            metric: 'OFFERS_CREATED',
-            value: offersCreated,
-          },
+          data: { date: today, metric: 'OFFERS_CREATED', value: offersCreated },
         }),
       ]);
 

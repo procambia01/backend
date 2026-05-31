@@ -6,6 +6,7 @@ import { EmailService } from './email.service';
 import { ReferralService } from './referral.service';
 import {
   EmailAlreadyExistsError,
+  ConflictError,
   InvalidCredentialsError,
   UserNotFoundError,
   InvalidTokenError,
@@ -44,14 +45,33 @@ export class AuthService {
     // Hash password
     const passwordHash = await HelpersUtil.hashPassword(userData.password);
 
+    // Normalize phone: treat empty string as null so multiple users without
+    // a phone number don't hit the unique constraint on the phone field
+    const phone = userData.phone?.trim() || null;
+
+    // Check if phone is already taken (only when provided)
+    if (phone) {
+      const existingPhone = await prisma.user.findFirst({ where: { phone } });
+      if (existingPhone) {
+        throw new ConflictError('Phone number is already in use');
+      }
+    }
+
     // Create user
+    // NOTE: Do NOT pass phone: null — MongoDB's unique index treats null as a
+    // concrete value, so two users with no phone both fail the unique constraint.
+    // Only include phone in the data object when it actually has a value.
+    const createData: any = {
+      name: userData.name,
+      email: userData.email,
+      passwordHash,
+    };
+    if (phone) {
+      createData.phone = phone;
+    }
+
     const user = await prisma.user.create({
-      data: {
-        name: userData.name,
-        email: userData.email,
-        passwordHash,
-        phone: userData.phone,
-      },
+      data: createData,
       select: {
         id: true,
         name: true,
@@ -73,9 +93,17 @@ export class AuthService {
       role: user.role,
     });
 
-    // Send verification email
+    // Send verification email (non-fatal — don't block registration if SMTP is not configured)
     const verificationToken = JwtUtil.generateEmailVerificationToken(user.id, user.email);
-    await this.emailService.sendVerificationEmail(user.email, user.name, verificationToken);
+    try {
+      await this.emailService.sendVerificationEmail(user.email, user.name, verificationToken);
+    } catch (emailError) {
+      // Log but don't fail registration — user can request resend later
+      console.warn(
+        '[AuthService] Verification email failed:',
+        emailError instanceof Error ? emailError.message : emailError
+      );
+    }
 
     // Generate referral code for new user
     await this.referralService.getMyReferralCode(user.id);

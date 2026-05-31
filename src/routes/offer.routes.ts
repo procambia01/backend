@@ -18,11 +18,7 @@ const offerController = new OfferController();
  * @desc    Get all offers (with filters)
  * @access  Private
  */
-router.get(
-  '/',
-  authenticate,
-  asyncHandler(offerController.getAllOffers)
-);
+router.get('/', authenticate, asyncHandler(offerController.getAllOffers));
 
 /**
  * @route   POST /api/v1/offers/search
@@ -37,48 +33,42 @@ router.post(
 );
 
 /**
+ * @route   GET /api/v1/offers/my
+ * @desc    Get current user's own offers
+ * @access  Private
+ * IMPORTANT: Must be defined BEFORE /:id — otherwise Express matches
+ * the literal string "my" as an :id param, Prisma tries to use it as
+ * a MongoDB ObjectID and throws "Malformed ObjectID" error.
+ */
+router.get('/my', authenticate, asyncHandler(offerController.getMyOffers));
+
+/**
  * @route   GET /api/v1/offers/nearby
  * @desc    Get nearby offers based on location
  * @access  Private
  */
-router.get(
-  '/nearby',
-  authenticate,
-  asyncHandler(offerController.getNearbyOffers)
-);
+router.get('/nearby', authenticate, asyncHandler(offerController.getNearbyOffers));
 
 /**
  * @route   GET /api/v1/offers/featured
  * @desc    Get featured offers
  * @access  Private
  */
-router.get(
-  '/featured',
-  authenticate,
-  asyncHandler(offerController.getFeaturedOffers)
-);
+router.get('/featured', authenticate, asyncHandler(offerController.getFeaturedOffers));
 
 /**
  * @route   GET /api/v1/offers/trending
  * @desc    Get trending offers
  * @access  Private
  */
-router.get(
-  '/trending',
-  authenticate,
-  asyncHandler(offerController.getTrendingOffers)
-);
+router.get('/trending', authenticate, asyncHandler(offerController.getTrendingOffers));
 
 /**
  * @route   GET /api/v1/offers/matches
  * @desc    Get matching offers for user
  * @access  Private
  */
-router.get(
-  '/matches',
-  authenticate,
-  asyncHandler(offerController.getMatchingOffers)
-);
+router.get('/matches', authenticate, asyncHandler(offerController.getMatchingOffers));
 
 /**
  * @route   POST /api/v1/offers
@@ -99,11 +89,7 @@ router.post(
  * @desc    Get offer by ID
  * @access  Private
  */
-router.get(
-  '/:id',
-  authenticate,
-  asyncHandler(offerController.getOfferById)
-);
+router.get('/:id', authenticate, asyncHandler(offerController.getOfferById));
 
 /**
  * @route   PUT /api/v1/offers/:id
@@ -122,98 +108,62 @@ router.put(
  * @desc    Delete offer
  * @access  Private (Owner only)
  */
-router.delete(
-  '/:id',
-  authenticate,
-  asyncHandler(offerController.deleteOffer)
-);
+router.delete('/:id', authenticate, asyncHandler(offerController.deleteOffer));
 
 /**
  * @route   PATCH /api/v1/offers/:id/pause
  * @desc    Pause offer
  * @access  Private (Owner only)
  */
-router.patch(
-  '/:id/pause',
-  authenticate,
-  asyncHandler(offerController.pauseOffer)
-);
+router.patch('/:id/pause', authenticate, asyncHandler(offerController.pauseOffer));
 
 /**
  * @route   PATCH /api/v1/offers/:id/resume
  * @desc    Resume offer
  * @access  Private (Owner only)
  */
-router.patch(
-  '/:id/resume',
-  authenticate,
-  asyncHandler(offerController.resumeOffer)
-);
+router.patch('/:id/resume', authenticate, asyncHandler(offerController.resumeOffer));
 
 /**
  * @route   POST /api/v1/offers/:id/boost
  * @desc    Boost offer (premium feature)
  * @access  Private (Owner only)
  */
-router.post(
-  '/:id/boost',
-  authenticate,
-  asyncHandler(offerController.boostOffer)
-);
+router.post('/:id/boost', authenticate, asyncHandler(offerController.boostOffer));
 
 /**
  * @route   POST /api/v1/offers/:id/feature
  * @desc    Feature offer (premium feature)
  * @access  Private (Owner only)
  */
-router.post(
-  '/:id/feature',
-  authenticate,
-  asyncHandler(offerController.featureOffer)
-);
+router.post('/:id/feature', authenticate, asyncHandler(offerController.featureOffer));
 
 /**
  * @route   GET /api/v1/offers/:id/matches
  * @desc    Get matches for specific offer
  * @access  Private (Owner only)
  */
-router.get(
-  '/:id/matches',
-  authenticate,
-  asyncHandler(offerController.getOfferMatches)
-);
+router.get('/:id/matches', authenticate, asyncHandler(offerController.getOfferMatches));
 
 /**
  * @route   POST /api/v1/offers/:id/view
  * @desc    Increment offer view count
  * @access  Private
  */
-router.post(
-  '/:id/view',
-  authenticate,
-  asyncHandler(offerController.incrementViewCount)
-);
+router.post('/:id/view', authenticate, asyncHandler(offerController.incrementViewCount));
 
 /**
  * @route   GET /api/v1/offers/:id/analytics
  * @desc    Get offer analytics
  * @access  Private (Owner only)
  */
-router.get(
-  '/:id/analytics',
-  authenticate,
-  asyncHandler(offerController.getOfferAnalytics)
-);
+router.get('/:id/analytics', authenticate, asyncHandler(offerController.getOfferAnalytics));
 
 /**
  * @route   POST /api/v1/offers/:id/report
  * @desc    Report an offer
  * @access  Private
  */
-router.post(
-  '/:id/report',
-  authenticate,
-  asyncHandler(offerController.reportOffer)
-);
+router.post('/:id/report', authenticate, asyncHandler(offerController.reportOffer));
 
 export default router;

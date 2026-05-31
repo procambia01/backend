@@ -8,13 +8,12 @@ import { ZodError } from 'zod';
 export class ErrorMiddleware {
   /**
    * Global error handler
+   * FIX: was using `this.handlePrismaError` and `this.handleMulterError` inside
+   * a static method — `this` is undefined when the function is exported as a
+   * standalone reference (errorHandler = ErrorMiddleware.handle). Changed all
+   * internal calls to use the class name directly: ErrorMiddleware.handlePrismaError
    */
-  static handle(
-    error: Error | AppError,
-    req: Request,
-    res: Response,
-    next: NextFunction
-  ): void {
+  static handle(error: Error | AppError, req: Request, res: Response, next: NextFunction): void {
     // Log error
     logger.error('Error occurred:', {
       message: error.message,
@@ -37,9 +36,9 @@ export class ErrorMiddleware {
       return;
     }
 
-    // Handle Prisma errors
+    // Handle Prisma known errors (e.g. unique constraint, not found)
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
-      const prismaError = this.handlePrismaError(error);
+      const prismaError = ErrorMiddleware.handlePrismaError(error);
       res.status(prismaError.statusCode).json({
         success: false,
         message: prismaError.message,
@@ -49,12 +48,26 @@ export class ErrorMiddleware {
       return;
     }
 
-    // Handle Prisma validation errors
+    // Handle Prisma validation errors (malformed ObjectID, bad query shape etc.)
     if (error instanceof Prisma.PrismaClientValidationError) {
       res.status(400).json({
         success: false,
         message: 'Invalid data provided',
         ...(config.isDevelopment && { details: error.message, stack: error.stack }),
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
+
+    // Handle raw Prisma engine errors (e.g. malformed ObjectID from inconsistent column data)
+    if (
+      error.constructor?.name === 'PrismaClientUnknownRequestError' ||
+      error.message?.includes('Malformed ObjectID') ||
+      error.message?.includes('Inconsistent column data')
+    ) {
+      res.status(400).json({
+        success: false,
+        message: 'Invalid ID format',
         timestamp: new Date().toISOString(),
       });
       return;
@@ -98,7 +111,7 @@ export class ErrorMiddleware {
 
     // Handle Multer errors
     if (error.name === 'MulterError') {
-      const multerError = this.handleMulterError(error);
+      const multerError = ErrorMiddleware.handleMulterError(error);
       res.status(multerError.statusCode).json({
         success: false,
         message: multerError.message,
@@ -107,7 +120,7 @@ export class ErrorMiddleware {
       return;
     }
 
-    // Handle generic errors
+    // Generic fallback
     const statusCode = 500;
     const message = config.isProduction
       ? 'Internal server error'
@@ -121,119 +134,72 @@ export class ErrorMiddleware {
     });
   }
 
-  /**
-   * Handle Prisma errors
-   */
   private static handlePrismaError(error: Prisma.PrismaClientKnownRequestError): {
     statusCode: number;
     message: string;
   } {
     switch (error.code) {
-      case 'P2002':
-        // Unique constraint violation
-        const field = (error.meta?.target as string[])?.join(', ') || 'field';
-        return {
-          statusCode: 409,
-          message: `${field} already exists`,
+      case 'P2002': {
+        // MongoDB Prisma returns meta.target as a string (e.g. "User_phone_key")
+        // PostgreSQL returns it as an array (e.g. ["email"]). Handle both.
+        const raw = error.meta?.target;
+        let field = 'field';
+        if (Array.isArray(raw)) {
+          field = raw.join(', ');
+        } else if (typeof raw === 'string') {
+          // Extract field from constraint name: "User_phone_key" → "phone"
+          // Pattern: ModelName_fieldName_key
+          const match = raw.match(/^[A-Z][a-zA-Z]+_(.+?)_key$/);
+          field = match ? match[1] : raw;
+        }
+        // Map internal field names to user-friendly labels
+        const labels: Record<string, string> = {
+          email: 'Email address',
+          phone: 'Phone number',
+          name: 'Name',
         };
-
+        const label = labels[field] ?? field;
+        return { statusCode: 409, message: `${label} is already in use` };
+      }
       case 'P2025':
-        // Record not found
-        return {
-          statusCode: 404,
-          message: 'Record not found',
-        };
-
+        return { statusCode: 404, message: 'Record not found' };
       case 'P2003':
-        // Foreign key constraint failed
-        return {
-          statusCode: 400,
-          message: 'Invalid reference to related record',
-        };
-
+        return { statusCode: 400, message: 'Invalid reference to related record' };
       case 'P2011':
-        // Null constraint violation
-        return {
-          statusCode: 400,
-          message: 'Required field cannot be null',
-        };
-
+        return { statusCode: 400, message: 'Required field cannot be null' };
       case 'P2014':
-        // Relation violation
-        return {
-          statusCode: 400,
-          message: 'Invalid relation',
-        };
-
+        return { statusCode: 400, message: 'Invalid relation' };
       case 'P2016':
-        // Query interpretation error
-        return {
-          statusCode: 400,
-          message: 'Invalid query parameters',
-        };
-
+        return { statusCode: 400, message: 'Invalid query parameters' };
       case 'P2021':
-        // Table does not exist
-        return {
-          statusCode: 500,
-          message: 'Database table does not exist',
-        };
-
+        return { statusCode: 500, message: 'Database table does not exist' };
       case 'P2022':
-        // Column does not exist
-        return {
-          statusCode: 500,
-          message: 'Database column does not exist',
-        };
-
+        return { statusCode: 500, message: 'Database column does not exist' };
       default:
         return {
           statusCode: 500,
-          message: config.isProduction
-            ? 'Database error'
-            : error.message,
+          message: config.isProduction ? 'Database error' : error.message,
         };
     }
   }
 
-  /**
-   * Handle Multer errors
-   */
   private static handleMulterError(error: any): {
     statusCode: number;
     message: string;
   } {
     switch (error.code) {
       case 'LIMIT_FILE_SIZE':
-        return {
-          statusCode: 400,
-          message: 'File size too large',
-        };
-
+        return { statusCode: 400, message: 'File size too large' };
       case 'LIMIT_FILE_COUNT':
-        return {
-          statusCode: 400,
-          message: 'Too many files',
-        };
-
+        return { statusCode: 400, message: 'Too many files' };
       case 'LIMIT_UNEXPECTED_FILE':
-        return {
-          statusCode: 400,
-          message: 'Unexpected file field',
-        };
-
+        return { statusCode: 400, message: 'Unexpected file field' };
       default:
-        return {
-          statusCode: 400,
-          message: 'File upload error',
-        };
+        return { statusCode: 400, message: 'File upload error' };
     }
   }
 
-  /**
-   * Handle 404 not found
-   */
-  static notFound(req: Request, res: Response, next: NextFunction): void {
+  static notFound(req: Request, res: Response, _next: NextFunction): void {
     res.status(404).json({
       success: false,
       message: `Route ${req.method} ${req.path} not found`,
@@ -241,9 +207,6 @@ export class ErrorMiddleware {
     });
   }
 
-  /**
-   * Async error wrapper
-   */
   static asyncHandler(fn: Function) {
     return (req: Request, res: Response, next: NextFunction): void => {
       Promise.resolve(fn(req, res, next)).catch(next);
@@ -251,9 +214,9 @@ export class ErrorMiddleware {
   }
 }
 
-// Export middleware functions
-export const errorHandler = ErrorMiddleware.handle;
-export const notFound = ErrorMiddleware.notFound;
-export const asyncHandler = ErrorMiddleware.asyncHandler;
+// Bound exports so `this` context is preserved when used as Express middleware
+export const errorHandler = ErrorMiddleware.handle.bind(ErrorMiddleware);
+export const notFound = ErrorMiddleware.notFound.bind(ErrorMiddleware);
+export const asyncHandler = ErrorMiddleware.asyncHandler.bind(ErrorMiddleware);
 
 export default ErrorMiddleware;

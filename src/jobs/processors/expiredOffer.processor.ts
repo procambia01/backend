@@ -1,6 +1,11 @@
+import { Worker, Job } from 'bullmq';
+import { redisConnection } from '../queue';
+import logger from '@/utils/logger.util';
+import prisma from '@/config/database';
+
 export const expiredOfferWorker = new Worker(
   'expired-offer',
-  async (job: Job) => {
+  async (_job: Job) => {
     logger.info('Checking for expired offers...');
 
     try {

@@ -1,5 +1,8 @@
+import { Worker, Job } from 'bullmq';
+import { redisConnection } from '../queue';
 import { NotificationService } from '@/services/notification.service';
 import { PushService } from '@/services/push.service';
+import logger from '@/utils/logger.util';
 
 const notificationService = new NotificationService();
 const pushService = new PushService();
@@ -17,12 +20,11 @@ export const notificationWorker = new Worker(
 
       // Send push notification if requested
       if (sendPush) {
-        await pushService.sendPushNotification(userId, title, message, data);
+        await pushService.sendToUser(userId, { title, body: message, data });
       }
 
       // Send email if requested
       if (sendEmail) {
-        // Queue email job
         const { addEmailJob } = await import('../queue');
         await addEmailJob({
           type: 'notification',

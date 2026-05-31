@@ -8,7 +8,11 @@ import { nanoid } from 'nanoid';
 
 // File type validators
 const imageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
-const documentTypes = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
+const documentTypes = [
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+];
 const videoTypes = ['video/mp4', 'video/mpeg', 'video/quicktime', 'video/webm'];
 
 export class UploadMiddleware {
@@ -302,11 +306,7 @@ export class UploadMiddleware {
       useMemoryStorage = true,
     } = options;
 
-    const fileFilter = (
-      req: Request,
-      file: Express.Multer.File,
-      cb: FileFilterCallback
-    ): void => {
+    const fileFilter = (req: Request, file: Express.Multer.File, cb: FileFilterCallback): void => {
       if (allowedTypes.includes(file.mimetype)) {
         cb(null, true);
       } else {
@@ -373,18 +373,20 @@ export class UploadMiddleware {
   }
 }
 
-// Export middleware functions
-export const uploadImage = UploadMiddleware.uploadImage;
-export const uploadImages = UploadMiddleware.uploadImages;
-export const uploadDocument = UploadMiddleware.uploadDocument;
-export const uploadDocuments = UploadMiddleware.uploadDocuments;
-export const uploadVideo = UploadMiddleware.uploadVideo;
-export const uploadFile = UploadMiddleware.uploadFile;
-export const uploadFiles = UploadMiddleware.uploadFiles;
-export const uploadProfileImage = UploadMiddleware.uploadProfileImage;
-export const uploadIdDocument = UploadMiddleware.uploadIdDocument;
-export const uploadSelfie = UploadMiddleware.uploadSelfie;
-export const uploadMessageAttachments = UploadMiddleware.uploadMessageAttachments;
-export const uploadFields = UploadMiddleware.uploadFields;
+// Export middleware functions — bound to UploadMiddleware so `this` works correctly
+// when called as standalone functions (e.g. uploadProfileImage() in routes)
+export const uploadImage = UploadMiddleware.uploadImage.bind(UploadMiddleware);
+export const uploadImages = UploadMiddleware.uploadImages.bind(UploadMiddleware);
+export const uploadDocument = UploadMiddleware.uploadDocument.bind(UploadMiddleware);
+export const uploadDocuments = UploadMiddleware.uploadDocuments.bind(UploadMiddleware);
+export const uploadVideo = UploadMiddleware.uploadVideo.bind(UploadMiddleware);
+export const uploadFile = UploadMiddleware.uploadFile.bind(UploadMiddleware);
+export const uploadFiles = UploadMiddleware.uploadFiles.bind(UploadMiddleware);
+export const uploadProfileImage = UploadMiddleware.uploadProfileImage.bind(UploadMiddleware);
+export const uploadIdDocument = UploadMiddleware.uploadIdDocument.bind(UploadMiddleware);
+export const uploadSelfie = UploadMiddleware.uploadSelfie.bind(UploadMiddleware);
+export const uploadMessageAttachments =
+  UploadMiddleware.uploadMessageAttachments.bind(UploadMiddleware);
+export const uploadFields = UploadMiddleware.uploadFields.bind(UploadMiddleware);
 
 export default UploadMiddleware;

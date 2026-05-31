@@ -27,6 +27,24 @@ export class OfferController {
   };
 
   /**
+   * Get current user's own offers
+   * Handles GET /api/v1/offers/my — must be routed BEFORE /:id
+   */
+  getMyOffers = async (req: Request, res: Response): Promise<Response> => {
+    const userId = req.user!.userId;
+    const pagination = PaginationUtil.parseParams(req.query);
+    const filters = { ...req.query, userId };
+    const result = await this.offerService.getUserOffers(userId, filters, pagination);
+    return ResponseUtil.paginated(
+      res,
+      result.data,
+      result.meta.page,
+      result.meta.perPage,
+      result.meta.total
+    );
+  };
+
+  /**
    * Search offers
    */
   searchOffers = async (req: Request, res: Response): Promise<Response> => {

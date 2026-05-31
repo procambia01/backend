@@ -1,10 +1,15 @@
+import { Worker, Job } from 'bullmq';
+import { redisConnection } from '../queue';
+import logger from '@/utils/logger.util';
+import prisma from '@/config/database';
+
 export const swapReminderWorker = new Worker(
   'swap-reminder',
   async (job: Job) => {
     logger.info(`Processing swap reminder: ${job.id}`);
 
     try {
-      const { swapId, userId, type } = job.data;
+      const { swapId, userId } = job.data;
 
       const swap = await prisma.swap.findUnique({
         where: { id: swapId },
@@ -16,7 +21,6 @@ export const swapReminderWorker = new Worker(
         return { success: false };
       }
 
-      // Send notification
       const { addNotificationJob } = await import('../queue');
       await addNotificationJob({
         userId,
@@ -27,7 +31,6 @@ export const swapReminderWorker = new Worker(
         sendPush: true,
       });
 
-      // Update reminder count
       await prisma.swap.update({
         where: { id: swapId },
         data: {

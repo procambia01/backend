@@ -22,13 +22,48 @@ async function main() {
 
   // Create system configs
   const configs = [
-    { key: 'max_swap_amount_unverified', value: '100', category: 'LIMITS', description: 'Maximum swap amount for unverified users' },
-    { key: 'max_swap_amount_verified', value: '10000', category: 'LIMITS', description: 'Maximum swap amount for verified users' },
-    { key: 'verification_fee', value: '5.00', category: 'PAYMENT', description: 'Verification fee amount' },
-    { key: 'premium_monthly_price', value: '9.99', category: 'PAYMENT', description: 'Premium monthly subscription price' },
-    { key: 'premium_yearly_price', value: '99.99', category: 'PAYMENT', description: 'Premium yearly subscription price' },
-    { key: 'min_trust_score', value: '0', category: 'SECURITY', description: 'Minimum trust score to create offers' },
-    { key: 'dispute_resolution_time_hours', value: '48', category: 'GENERAL', description: 'Time to resolve disputes' },
+    {
+      key: 'max_swap_amount_unverified',
+      value: '100',
+      category: 'LIMITS',
+      description: 'Maximum swap amount for unverified users',
+    },
+    {
+      key: 'max_swap_amount_verified',
+      value: '10000',
+      category: 'LIMITS',
+      description: 'Maximum swap amount for verified users',
+    },
+    {
+      key: 'verification_fee',
+      value: '5.00',
+      category: 'PAYMENT',
+      description: 'Verification fee amount',
+    },
+    {
+      key: 'premium_monthly_price',
+      value: '9.99',
+      category: 'PAYMENT',
+      description: 'Premium monthly subscription price',
+    },
+    {
+      key: 'premium_yearly_price',
+      value: '99.99',
+      category: 'PAYMENT',
+      description: 'Premium yearly subscription price',
+    },
+    {
+      key: 'min_trust_score',
+      value: '0',
+      category: 'SECURITY',
+      description: 'Minimum trust score to create offers',
+    },
+    {
+      key: 'dispute_resolution_time_hours',
+      value: '48',
+      category: 'GENERAL',
+      description: 'Time to resolve disputes',
+    },
   ];
 
   for (const config of configs) {

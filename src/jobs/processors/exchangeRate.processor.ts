@@ -1,18 +1,19 @@
+import { Worker, Job } from 'bullmq';
+import { redisConnection } from '../queue';
 import { ExchangeRateService } from '@/services/exchangeRate.service';
-import prisma from '@/config/database';
+import logger from '@/utils/logger.util';
 
 const exchangeRateService = new ExchangeRateService();
 
 export const exchangeRateWorker = new Worker(
   'exchange-rate',
-  async (job: Job) => {
+  async (_job: Job) => {
     logger.info('Updating exchange rates...');
 
     try {
       const currencies = ['USD', 'EUR', 'GBP', 'NGN', 'GHS', 'KES', 'ZAR'];
-      const rates: any[] = [];
+      const rates: { from: string; to: string; rate: number }[] = [];
 
-      // Fetch rates for all currency pairs
       for (const from of currencies) {
         for (const to of currencies) {
           if (from !== to) {
