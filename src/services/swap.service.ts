@@ -1,6 +1,8 @@
 // src/services/swap.service.ts
 import { prisma } from '@/config/database';
 import { NotificationService } from './notification.service';
+import { FeeService } from './fee.service';
+import { ReferralService } from './referral.service';
 import { NotFoundError, ForbiddenError, BadRequestError } from '@/utils/error.util';
 import { SwapStatus, NotificationType, DisputeReason } from '@prisma/client';
 import { PaginationParams } from '@/utils/pagination.util';
@@ -8,9 +10,13 @@ import logger from '@/utils/logger.util';
 
 export class SwapService {
   private notificationService: NotificationService;
+  private feeService: FeeService;
+  private referralService: ReferralService;
 
   constructor() {
     this.notificationService = new NotificationService();
+    this.feeService = new FeeService();
+    this.referralService = new ReferralService();
   }
 
   /**
@@ -641,6 +647,26 @@ export class SwapService {
     ]);
 
     logger.info(`Swap completed: ${swapId}`);
+
+    // Referral completion + platform fee settlement both depend on the
+    // swap being marked COMPLETED and user stats being current, so they
+    // run after the above. Neither should ever block the response to the
+    // user — payment/referral issues are surfaced asynchronously via
+    // notifications, not by failing the swap-completion request.
+    try {
+      await Promise.all([
+        this.referralService.completeReferral(swap.initiatorId),
+        this.referralService.completeReferral(swap.receiverId),
+      ]);
+    } catch (err) {
+      logger.error(`Referral completion failed for swap ${swapId}: ${(err as Error).message}`);
+    }
+
+    try {
+      await this.feeService.settleSwapFees(swap);
+    } catch (err) {
+      logger.error(`Fee settlement failed for swap ${swapId}: ${(err as Error).message}`);
+    }
 
     return swap;
   }

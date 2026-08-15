@@ -22,21 +22,34 @@ const fileFormat = winston.format.combine(
   winston.format.json()
 );
 
-// Ensure logs directory exists
+// Ensure logs directory exists — but only when we're actually going to
+// write to it. On Cloud Run (and most container platforms) the
+// filesystem is ephemeral/in-memory and per-instance, so file logging
+// there just burns memory and loses everything on restart with nothing
+// to show for it. Cloud Run automatically captures stdout/stderr into
+// Cloud Logging, so the console transport below is what actually matters
+// in that environment. K_SERVICE is set automatically by Cloud Run on
+// every revision — no configuration needed to detect it.
+const isCloudRun = Boolean(process.env.K_SERVICE);
+const fileLoggingEnabled = config.isProduction && !isCloudRun;
+
 const logsDir = path.resolve(process.cwd(), config.logging.filePath);
-try {
-  if (!fs.existsSync(logsDir)) {
-    fs.mkdirSync(logsDir, { recursive: true });
+if (fileLoggingEnabled || !config.isProduction) {
+  try {
+    if (!fs.existsSync(logsDir)) {
+      fs.mkdirSync(logsDir, { recursive: true });
+    }
+  } catch (e) {
+    console.warn('[LOGGER] Could not create logs directory:', e);
   }
-} catch (e) {
-  console.warn('[LOGGER] Could not create logs directory:', e);
 }
 
 // Always include console transport
 const transports: winston.transport[] = [new winston.transports.Console({ format: consoleFormat })];
 
-if (config.isProduction) {
-  // Production: use DailyRotateFile (lazy-required to avoid Windows dev hang)
+if (fileLoggingEnabled) {
+  // Production on a persistent filesystem (VM, PM2, traditional host):
+  // use DailyRotateFile (lazy-required to avoid Windows dev hang)
   try {
     const DailyRotateFile = require('winston-daily-rotate-file');
     transports.push(

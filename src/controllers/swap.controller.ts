@@ -1,13 +1,18 @@
 import { Request, Response } from 'express';
 import { SwapService } from '@/services/swap.service';
+import { FeeService } from '@/services/fee.service';
 import ResponseUtil from '@/utils/response.util';
 import PaginationUtil from '@/utils/pagination.util';
+import { NotFoundError, ForbiddenError, BadRequestError } from '@/utils/error.util';
+import { prisma } from '@/config/database';
 
 export class SwapController {
   private swapService: SwapService;
+  private feeService: FeeService;
 
   constructor() {
     this.swapService = new SwapService();
+    this.feeService = new FeeService();
   }
 
   /**
@@ -222,5 +227,71 @@ export class SwapController {
     const userId = req.user!.userId;
     const participants = await this.swapService.getParticipants(id, userId);
     return ResponseUtil.success(res, participants);
+  };
+
+  /**
+   * Get this user's fee status for a swap
+   */
+  getFeeStatus = async (req: Request, res: Response): Promise<Response> => {
+    const { id } = req.params;
+    const userId = req.user!.userId;
+    const swap = await prisma.swap.findUnique({ where: { id } });
+    if (!swap) throw new NotFoundError('Swap not found');
+
+    const isInitiator = swap.initiatorId === userId;
+    const isReceiver = swap.receiverId === userId;
+    if (!isInitiator && !isReceiver) throw new ForbiddenError('You do not have access to this swap');
+
+    const amount = isInitiator ? swap.initiatorFeeAmount : swap.receiverFeeAmount;
+    const waived = isInitiator ? swap.initiatorFeeWaived : swap.receiverFeeWaived;
+    const paidAt = isInitiator ? swap.initiatorFeePaidAt : swap.receiverFeePaidAt;
+    const currency = isInitiator ? swap.initiatorGivesCurrency : swap.receiverGivesCurrency;
+
+    return ResponseUtil.success(res, {
+      amount,
+      currency,
+      waived,
+      paid: Boolean(paidAt),
+      paidAt,
+      needsPayment: !waived && !paidAt && Boolean(amount),
+    });
+  };
+
+  /**
+   * Create a Stripe Checkout session for a user to pay their outstanding
+   * swap fee (used when we couldn't charge their saved card off-session,
+   * or they never saved one).
+   */
+  createFeeCheckout = async (req: Request, res: Response): Promise<Response> => {
+    const { id } = req.params;
+    const userId = req.user!.userId;
+    const swap = await prisma.swap.findUnique({ where: { id } });
+    if (!swap) throw new NotFoundError('Swap not found');
+    if (swap.status !== 'COMPLETED') throw new BadRequestError('Fees are only due after a swap is completed');
+
+    const isInitiator = swap.initiatorId === userId;
+    const isReceiver = swap.receiverId === userId;
+    if (!isInitiator && !isReceiver) throw new ForbiddenError('You do not have access to this swap');
+
+    const amount = isInitiator ? swap.initiatorFeeAmount : swap.receiverFeeAmount;
+    const waived = isInitiator ? swap.initiatorFeeWaived : swap.receiverFeeWaived;
+    const paidAt = isInitiator ? swap.initiatorFeePaidAt : swap.receiverFeePaidAt;
+    const currency = isInitiator ? swap.initiatorGivesCurrency : swap.receiverGivesCurrency;
+
+    if (waived || paidAt || !amount) {
+      throw new BadRequestError('No fee is due on this swap');
+    }
+
+    const origin = (req.headers.origin as string) ?? process.env.APP_URL ?? '';
+    const session = await this.feeService.createFeeCheckoutSession(
+      userId,
+      id,
+      isInitiator ? 'initiator' : 'receiver',
+      amount,
+      currency,
+      origin
+    );
+
+    return ResponseUtil.success(res, { url: session.url });
   };
 }

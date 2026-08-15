@@ -3,7 +3,8 @@ import { prisma } from '@/config/database';
 import { NotFoundError, BadRequestError } from '@/utils/error.util';
 import logger from '@/utils/logger.util';
 import { nanoid } from 'nanoid';
-import { NotificationType, ReferralStatus } from '@prisma/client';
+import { NotificationType, ReferralStatus, TransactionType, TransactionStatus } from '@prisma/client';
+import { MONETIZATION } from '@/config/monetization';
 
 export class ReferralService {
   /**
@@ -202,43 +203,55 @@ export class ReferralService {
    */
   async completeReferral(referredId: string) {
     const referral = await prisma.referral.findFirst({
-      where: { 
+      where: {
         referredId,
         status: ReferralStatus.PENDING,
       },
     });
 
     if (!referral) {
-      logger.warn(`No pending referral found for user ${referredId}`);
-      return;
+      return; // no pending referral — not an error, just nothing to do
     }
 
-    // Define reward amounts (could be configurable)
-    const referrerReward = 10; // Example: $10 or 10 credits for referrer
-    const referredReward = 5; // Example: $5 or 5 credits for referred user
+    const referrerReward = MONETIZATION.referral.referrerRewardUSD;
+    // The referred user's reward is the waived platform fee on this swap
+    // (applied separately in FeeService), so we don't double-credit here.
+    const referredReward = 0;
 
-    // Update referral status
-    await prisma.referral.update({
-      where: { id: referral.id },
-      data: {
-        status: ReferralStatus.COMPLETED,
-        referrerReward,
-        referredReward,
-        completedAt: new Date(),
-      },
-    });
+    await prisma.$transaction([
+      prisma.referral.update({
+        where: { id: referral.id },
+        data: {
+          status: ReferralStatus.COMPLETED,
+          referrerReward,
+          referredReward,
+          completedAt: new Date(),
+        },
+      }),
+      // Real, queryable record of the referrer's earned credit — this is
+      // what powers "Referral Earnings" in the referrer's dashboard and
+      // is what an admin would reconcile against actual payouts.
+      prisma.transaction.create({
+        data: {
+          userId: referral.referrerId,
+          type: TransactionType.REFERRAL_BONUS,
+          amount: referrerReward,
+          currency: 'USD',
+          description: `Referral bonus — ${referredId} completed their first swap`,
+          status: TransactionStatus.COMPLETED,
+          completedAt: new Date(),
+          metadata: { referralId: referral.id, referredId },
+        },
+      }),
+    ]);
 
-    // Award bonus to referrer (implement according to your rewards system)
-    // This could be credits, discount, or cash bonus
-
-    // Send notifications
     await Promise.all([
       prisma.notification.create({
         data: {
           userId: referral.referrerId,
           type: NotificationType.SYSTEM_ALERT,
-          title: 'Referral Reward Earned!',
-          message: `You've earned ${referrerReward} credits for your successful referral!`,
+          title: 'Referral reward earned!',
+          message: `You've earned $${referrerReward.toFixed(2)} credit — your referral completed their first swap.`,
           link: `/referrals`,
         },
       }),
@@ -246,14 +259,14 @@ export class ReferralService {
         data: {
           userId: referredId,
           type: NotificationType.SYSTEM_ALERT,
-          title: 'Welcome Bonus!',
-          message: `You've earned ${referredReward} credits as a welcome bonus!`,
+          title: 'Welcome bonus applied!',
+          message: `Your first swap's platform fee was waived as a welcome bonus.`,
           link: `/profile`,
         },
       }),
     ]);
 
-    logger.info(`Referral completed: ${referral.id}, rewards: ${referrerReward} (referrer), ${referredReward} (referred)`);
+    logger.info(`Referral completed: ${referral.id}, referrer credited $${referrerReward}`);
   }
 
   /**

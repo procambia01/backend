@@ -6,9 +6,23 @@ import { TransactionStatus } from '@prisma/client';
 import logger from '@/utils/logger.util';
 import { BadRequestError, NotFoundError } from '@/utils/error.util';
 
-const stripe = new Stripe(config.stripe?.secretKey ?? '', {
-  apiVersion: '2024-11-20.acacia',
+const stripe = new Stripe(config.payment.stripe.secretKey ?? '', {
+  apiVersion: '2025-02-24.acacia',
 });
+
+// Stripe subscription statuses are lowercase ('active', 'canceled', ...)
+// and use the single-L American spelling; our SubscriptionStatus enum
+// uses 'CANCELLED'. Map explicitly instead of relying on toUpperCase().
+const STRIPE_STATUS_MAP: Record<string, string> = {
+  active: 'ACTIVE',
+  trialing: 'TRIALING',
+  past_due: 'PAST_DUE',
+  canceled: 'CANCELLED',
+  incomplete: 'INCOMPLETE',
+  incomplete_expired: 'CANCELLED',
+  unpaid: 'UNPAID',
+  paused: 'CANCELLED',
+};
 
 // ── Plan catalogue ────────────────────────────────────────
 export const PLANS = {
@@ -219,7 +233,7 @@ export class StripeService {
           stripeSubscriptionId: sub.id,
           stripePriceId: (sub.items.data[0].price as Stripe.Price).id,
           planId,
-          status: sub.status.toUpperCase() as any,
+          status: (STRIPE_STATUS_MAP[sub.status] ?? 'ACTIVE') as any,
           currentPeriodEnd: periodEnd,
           cancelAtPeriodEnd: sub.cancel_at_period_end,
           tier: plan.tier,
@@ -228,7 +242,7 @@ export class StripeService {
           currency: plan.currency.toUpperCase(),
         },
         update: {
-          status: sub.status.toUpperCase() as any,
+          status: (STRIPE_STATUS_MAP[sub.status] ?? 'ACTIVE') as any,
           currentPeriodEnd: periodEnd,
           cancelAtPeriodEnd: sub.cancel_at_period_end,
         },
@@ -311,7 +325,7 @@ export class StripeService {
   }
 
   constructWebhookEvent(payload: Buffer, signature: string): Stripe.Event {
-    const secret = config.stripe?.webhookSecret;
+    const secret = config.payment.stripe.webhookSecret;
     if (!secret) throw new Error('Stripe webhook secret not configured');
     return stripe.webhooks.constructEvent(payload, signature, secret);
   }

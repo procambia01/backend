@@ -7,7 +7,7 @@ import logger from '@/utils/logger.util';
 
 const paystack = axios.create({
   baseURL: 'https://api.paystack.co',
-  headers: { Authorization: `Bearer ${config.paystack?.secretKey ?? ''}` },
+  headers: { Authorization: `Bearer ${config.payment.paystack.secretKey ?? ''}` },
 });
 
 export class PaymentService {

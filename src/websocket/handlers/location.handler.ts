@@ -1,3 +1,5 @@
+import { Server as SocketIOServer, Socket } from 'socket.io';
+
 export function locationHandler(io: SocketIOServer, socket: Socket) {
   const userId = socket.data.userId;
 

@@ -1,10 +1,18 @@
 // src/services/user.service.ts
+import Stripe from 'stripe';
 import { prisma } from '@/config/database';
 import { NotFoundError, BadRequestError } from '@/utils/error.util';
 import { PaginationParams } from '@/utils/pagination.util';
 import { cloudinaryService } from '@/config/cloudinary';
-import { ActivityType, PremiumTier } from '@prisma/client';
+import { ActivityType, PremiumTier, TransactionType, TransactionStatus, NotificationType } from '@prisma/client';
+import { MONETIZATION } from '@/config/monetization';
+import config from '@/config/env';
+import { generateApiKey } from '@/utils/apiKey.util';
 import logger from '@/utils/logger.util';
+
+const stripe = new Stripe(config.payment.stripe.secretKey ?? '', {
+  apiVersion: '2025-02-24.acacia',
+});
 
 export class UserService {
   /**
@@ -533,6 +541,14 @@ export class UserService {
       country: string;
     }
   ) {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundError('User not found');
+    if (!user.verificationFeePaid) {
+      throw new BadRequestError(
+        'Please complete the one-time verification fee before submitting documents.'
+      );
+    }
+
     const result = await cloudinaryService.uploadIdDocument(file.buffer, userId);
 
     await prisma.user.update({
@@ -783,5 +799,216 @@ export class UserService {
         hasMore: page < Math.ceil(total / perPage),
       },
     };
+  }
+
+  // ────────────────────────────────────────────────────────
+  // Paid verification (KYC)
+  // ────────────────────────────────────────────────────────
+
+  /** Create a Stripe Checkout session for the one-time verification fee. */
+  async createVerificationCheckoutSession(userId: string, origin: string) {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundError('User not found');
+    if (user.verificationFeePaid) {
+      throw new BadRequestError('Verification fee already paid');
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price_data: {
+            currency: MONETIZATION.verification.currency,
+            unit_amount: MONETIZATION.verification.amountCents,
+            product_data: {
+              name: 'ID Verification',
+              description: 'One-time fee to submit ID verification and earn the Verified Trader badge.',
+            },
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: { type: 'VERIFICATION_FEE', userId },
+      success_url: `${origin}/dashboard/profile/verification?fee=paid`,
+      cancel_url: `${origin}/dashboard/profile/verification?fee=cancelled`,
+    });
+
+    return session;
+  }
+
+  /** Stripe webhook handler for checkout.session.completed, type=VERIFICATION_FEE */
+  async handleVerificationCheckoutCompleted(session: Stripe.Checkout.Session) {
+    const { userId } = session.metadata ?? {};
+    if (!userId) return;
+
+    const amount = (session.amount_total ?? 0) / 100;
+    const currency = (session.currency ?? 'usd').toUpperCase();
+
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: userId },
+        data: { verificationFeePaid: true },
+      }),
+      prisma.transaction.create({
+        data: {
+          userId,
+          type: TransactionType.VERIFICATION_FEE,
+          amount,
+          currency,
+          description: 'ID verification fee',
+          status: TransactionStatus.COMPLETED,
+          paymentGateway: 'stripe',
+          gatewayTransactionId: session.id,
+          completedAt: new Date(),
+        },
+      }),
+    ]);
+
+    logger.info(`Verification fee paid — user ${userId}`);
+  }
+
+  // ────────────────────────────────────────────────────────
+  // B2B / partner API access
+  // ────────────────────────────────────────────────────────
+
+  /** Create a Stripe Checkout session (subscription) for a partner plan. */
+  async createPartnerCheckoutSession(userId: string, planId: string, origin: string) {
+    const plan = MONETIZATION.partner.plans.find((p) => p.id === planId);
+    if (!plan) throw new BadRequestError('Invalid partner plan');
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundError('User not found');
+
+    let stripeCustomerId = user.stripeCustomerId;
+    if (!stripeCustomerId) {
+      const customer = await stripe.customers.create({
+        email: user.email,
+        name: user.name,
+        metadata: { userId },
+      });
+      stripeCustomerId = customer.id;
+      await prisma.user.update({ where: { id: userId }, data: { stripeCustomerId } });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      customer: stripeCustomerId,
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price_data: {
+            currency: MONETIZATION.partner.currency,
+            unit_amount: plan.amountCents,
+            recurring: { interval: plan.interval },
+            product_data: { name: plan.name },
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: { type: 'PARTNER_ACCESS', userId, planId, rateLimit: String(plan.rateLimitPerMinute) },
+      success_url: `${origin}/dashboard/partner?checkout=success`,
+      cancel_url: `${origin}/dashboard/partner?checkout=cancelled`,
+    });
+
+    return session;
+  }
+
+  /**
+   * Stripe webhook handler for checkout.session.completed, type=PARTNER_ACCESS.
+   * Flags the account as a business partner and issues their first API key.
+   */
+  async handlePartnerCheckoutCompleted(session: Stripe.Checkout.Session) {
+    const { userId, rateLimit } = session.metadata ?? {};
+    if (!userId) return;
+
+    await prisma.user.update({
+      where: { id: userId },
+      data: { isBusinessPartner: true },
+    });
+
+    const { rawKey, keyPrefix, keyHash } = generateApiKey();
+    await prisma.apiKey.create({
+      data: {
+        userId,
+        name: 'Default key',
+        keyPrefix,
+        keyHash,
+        scopes: ['rates:read', 'offers:read'],
+        rateLimitPerMinute: Number(rateLimit) || 60,
+      },
+    });
+
+    await prisma.transaction.create({
+      data: {
+        userId,
+        type: TransactionType.BUSINESS_API_ACCESS,
+        amount: (session.amount_total ?? 0) / 100,
+        currency: (session.currency ?? 'usd').toUpperCase(),
+        description: 'Partner API access subscription',
+        status: TransactionStatus.COMPLETED,
+        paymentGateway: 'stripe',
+        gatewayTransactionId: session.id,
+        completedAt: new Date(),
+      },
+    });
+
+    // The raw key is only ever available at issuance time — deliver it
+    // via a one-time notification link the partner dashboard reads once.
+    await prisma.notification.create({
+      data: {
+        userId,
+        type: NotificationType.SYSTEM_ALERT,
+        title: 'Your API key is ready',
+        message: `Key: ${rawKey} — save this now, it won't be shown again. Manage keys from your partner dashboard.`,
+        link: '/dashboard/partner',
+      },
+    });
+
+    logger.info(`Partner access activated for user ${userId}`);
+  }
+
+  /** Issue an additional API key for an existing partner. */
+  async createApiKey(userId: string, name: string) {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user?.isBusinessPartner) {
+      throw new BadRequestError('Partner API access required to create keys');
+    }
+
+    const { rawKey, keyPrefix, keyHash } = generateApiKey();
+    const key = await prisma.apiKey.create({
+      data: { userId, name, keyPrefix, keyHash },
+    });
+
+    // rawKey is returned once, here, and never again.
+    return { ...key, rawKey };
+  }
+
+  async listApiKeys(userId: string) {
+    return prisma.apiKey.findMany({
+      where: { userId },
+      select: {
+        id: true,
+        name: true,
+        keyPrefix: true,
+        isActive: true,
+        rateLimitPerMinute: true,
+        requestCount: true,
+        lastUsedAt: true,
+        createdAt: true,
+        revokedAt: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async revokeApiKey(userId: string, keyId: string) {
+    const key = await prisma.apiKey.findUnique({ where: { id: keyId } });
+    if (!key || key.userId !== userId) throw new NotFoundError('API key not found');
+
+    return prisma.apiKey.update({
+      where: { id: keyId },
+      data: { isActive: false, revokedAt: new Date() },
+    });
   }
 }

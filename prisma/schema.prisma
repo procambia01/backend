@@ -87,6 +87,8 @@ model User {
   premiumTier         PremiumTier?
   premiumExpiry       DateTime?
   verificationFeePaid Boolean      @default(false)
+  stripeCustomerId    String?      @unique
+  isBusinessPartner   Boolean      @default(false)
 
   // Preferences
   preferredCurrencies     String[] @default([])
@@ -127,6 +129,8 @@ model User {
   pushTokens        PushToken[]       @relation("PushTokens")
   activities        ActivityLog[]     @relation("Activities")
   adminLogs         AdminLog[]
+  subscriptions     Subscription[]
+  apiKeys           ApiKey[]
 }
 
 // ✅ ADDED - Add this enum
@@ -238,6 +242,9 @@ model SwapOffer {
   viewCount  Int @default(0)
   matchCount Int @default(0)
 
+  // Boosted / featured placement (paid)
+  boostedUntil DateTime?
+
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   expiresAt DateTime?
@@ -328,6 +335,17 @@ model Swap {
   remindersSent  Int       @default(0)
   lastReminderAt DateTime?
 
+  // Platform fee (take-rate monetization)
+  // Charged on completion; waived for premium members and each user's
+  // first swap when it originated from a completed referral.
+  feeStatus          SwapFeeStatus @default(NONE)
+  initiatorFeeAmount Float?
+  initiatorFeeWaived Boolean       @default(false)
+  initiatorFeePaidAt DateTime?
+  receiverFeeAmount  Float?
+  receiverFeeWaived  Boolean       @default(false)
+  receiverFeePaidAt  DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -353,6 +371,15 @@ enum SwapStatus {
   DISPUTED
   FAILED
   EXPIRED
+}
+
+enum SwapFeeStatus {
+  NONE // not yet computed (swap not completed)
+  PENDING // computed, awaiting payment from one or both parties
+  PARTIALLY_PAID
+  PAID
+  WAIVED
+  FAILED
 }
 
 // ============================================
@@ -586,6 +613,8 @@ enum TransactionType {
   BOOST_OFFER
   BULK_SWAP_ACCESS
   REFERRAL_BONUS
+  SWAP_FEE
+  BUSINESS_API_ACCESS
   WITHDRAWAL
 }
 
@@ -596,6 +625,69 @@ enum TransactionStatus {
   FAILED
   REFUNDED
   CANCELLED
+}
+
+// ============================================
+// SUBSCRIPTIONS (Stripe-backed premium/business plans)
+// ============================================
+
+model Subscription {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  userId String @db.ObjectId
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  stripeSubscriptionId String @unique
+  stripePriceId        String
+  planId               String // e.g. PREMIUM_MONTHLY, BUSINESS_YEARLY
+
+  status            SubscriptionStatus @default(ACTIVE)
+  tier              PremiumTier
+  interval          String // "month" | "year"
+  amount            Float
+  currency          String   @default("USD")
+  currentPeriodEnd  DateTime
+  cancelAtPeriodEnd Boolean  @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  TRIALING
+  PAST_DUE
+  CANCELLED
+  INCOMPLETE
+  UNPAID
+}
+
+// ============================================
+// PARTNER / B2B API ACCESS
+// ============================================
+
+model ApiKey {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  userId String @db.ObjectId
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name       String // human label, e.g. "Lagos Forex Bureau — production"
+  keyPrefix  String // first 8 chars, shown in dashboards for identification
+  keyHash    String @unique // sha256 of the full key; the raw key is never stored
+  scopes     String[] @default(["rates:read", "offers:read"])
+  isActive   Boolean  @default(true)
+
+  rateLimitPerMinute Int @default(60)
+  requestCount       Int @default(0)
+  lastUsedAt         DateTime?
+
+  createdAt DateTime  @default(now())
+  revokedAt DateTime?
+  expiresAt DateTime?
+
+  @@index([userId])
 }
 
 // ============================================

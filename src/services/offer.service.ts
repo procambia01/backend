@@ -1,11 +1,18 @@
 // src/services/offer.service.ts
+import Stripe from 'stripe';
 import { prisma } from '@/config/database';
 import { NotFoundError, ForbiddenError, BadRequestError } from '@/utils/error.util';
 import { PaginationParams } from '@/utils/pagination.util';
-import { OfferStatus } from '@prisma/client';
+import { OfferStatus, TransactionType, TransactionStatus } from '@prisma/client';
 import DistanceUtil from '@/utils/distance.util';
 import { ExchangeRateService } from './exchangeRate.service';
+import { MONETIZATION } from '@/config/monetization';
+import config from '@/config/env';
 import logger from '@/utils/logger.util';
+
+const stripe = new Stripe(config.payment.stripe.secretKey ?? '', {
+  apiVersion: '2025-02-24.acacia',
+});
 
 // Type for offers with distance
 type OfferWithDistance = any & { distance: number };
@@ -38,7 +45,7 @@ export class OfferService {
         where,
         skip,
         take: perPage,
-        orderBy: { [sortBy || 'createdAt']: sortOrder || 'desc' },
+        orderBy: sortBy ? { [sortBy]: sortOrder || 'desc' } : [{ boostedUntil: 'desc' }, { createdAt: 'desc' }],
         include: {
           user: {
             select: {
@@ -407,6 +414,21 @@ export class OfferService {
    * Create offer
    */
   async createOffer(userId: string, offerData: any) {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    const isPremium =
+      user?.isPremium && (!user.premiumExpiry || user.premiumExpiry > new Date());
+
+    if (!isPremium) {
+      const activeCount = await prisma.swapOffer.count({
+        where: { userId, status: { in: ['ACTIVE', 'MATCHED', 'PAUSED'] } },
+      });
+      if (activeCount >= MONETIZATION.freeTier.maxActiveOffers) {
+        throw new BadRequestError(
+          `Free accounts are limited to ${MONETIZATION.freeTier.maxActiveOffers} active offers. Upgrade to Premium for unlimited offers.`
+        );
+      }
+    }
+
     if (!offerData.exchangeRate) {
       offerData.exchangeRate = await this.exchangeRateService.getRate(
         offerData.haveCurrency,
@@ -557,23 +579,31 @@ export class OfferService {
   }
 
   /**
-   * Boost offer
+   * Boost offer — free instant perk for Premium/Business members.
+   * Non-premium users pay per-boost via createBoostCheckoutSession instead.
    */
-  async boostOffer(offerId: string, userId: string, duration: number) {
-    return this.updateOffer(offerId, userId, {
-      // Add boostedUntil field to your schema if needed
-      updatedAt: new Date(),
-    });
+  async boostOffer(offerId: string, userId: string, hours: number) {
+    const offer = await this.getOfferById(offerId);
+    if (offer.userId !== userId) throw new ForbiddenError('You do not own this offer');
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    const isPremium =
+      user?.isPremium && (!user.premiumExpiry || user.premiumExpiry > new Date());
+    if (!isPremium) {
+      throw new ForbiddenError(
+        'Boosting is a Premium perk. Upgrade to Premium, or purchase a one-time boost.'
+      );
+    }
+
+    return this.applyBoost(offerId, hours);
   }
 
   /**
-   * Feature offer
+   * Feature offer — same mechanism as boostOffer, kept as a distinct
+   * endpoint for UI copy purposes ("boosted" vs "featured" placement).
    */
-  async featureOffer(offerId: string, userId: string, duration: number) {
-    return this.updateOffer(offerId, userId, {
-      // Add featuredUntil field to your schema if needed
-      updatedAt: new Date(),
-    });
+  async featureOffer(offerId: string, userId: string, hours: number) {
+    return this.boostOffer(offerId, userId, hours);
   }
 
   /**
@@ -668,5 +698,99 @@ export class OfferService {
     });
 
     logger.warn(`Offer reported: ${offerId} by user ${userId} - Reason: ${reason}`);
+  }
+
+  /**
+   * Boost / feature an offer for a paid duration. Called after a Stripe
+   * Checkout session for the boost completes (see webhook handler).
+   */
+  async applyBoost(offerId: string, hours: number) {
+    const offer = await prisma.swapOffer.findUnique({ where: { id: offerId } });
+    if (!offer) throw new NotFoundError('Offer not found');
+
+    // Extend from the current boostedUntil if still active, otherwise
+    // from now — so stacking a second boost adds time rather than
+    // wasting whatever was left on the first one.
+    const base =
+      offer.boostedUntil && offer.boostedUntil > new Date() ? offer.boostedUntil : new Date();
+    const boostedUntil = new Date(base.getTime() + hours * 60 * 60 * 1000);
+
+    return prisma.swapOffer.update({
+      where: { id: offerId },
+      data: { boostedUntil },
+    });
+  }
+
+  /**
+   * Create a Stripe Checkout session for boosting an offer.
+   * `optionIndex` refers to MONETIZATION.boost.options.
+   */
+  async createBoostCheckoutSession(
+    offerId: string,
+    userId: string,
+    optionIndex: number,
+    origin: string
+  ) {
+    const offer = await prisma.swapOffer.findUnique({ where: { id: offerId } });
+    if (!offer) throw new NotFoundError('Offer not found');
+    if (offer.userId !== userId) throw new ForbiddenError('You do not own this offer');
+
+    const option = MONETIZATION.boost.options[optionIndex];
+    if (!option) throw new BadRequestError('Invalid boost option');
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price_data: {
+            currency: MONETIZATION.boost.currency,
+            unit_amount: option.amountCents,
+            product_data: {
+              name: `Boost offer — ${option.label}`,
+              description: `Feature your ${offer.haveCurrency}→${offer.wantCurrency} offer at the top of search results for ${option.label}.`,
+            },
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        type: 'BOOST_OFFER',
+        offerId,
+        userId,
+        hours: String(option.hours),
+      },
+      success_url: `${origin}/dashboard/offers/${offerId}?boost=success`,
+      cancel_url: `${origin}/dashboard/offers/${offerId}?boost=cancelled`,
+    });
+
+    return session;
+  }
+
+  /**
+   * Called from the Stripe webhook on checkout.session.completed
+   * where metadata.type === 'BOOST_OFFER'.
+   */
+  async handleBoostCheckoutCompleted(session: Stripe.Checkout.Session) {
+    const { offerId, userId, hours } = session.metadata ?? {};
+    if (!offerId || !hours) return;
+
+    await this.applyBoost(offerId, Number(hours));
+
+    await prisma.transaction.create({
+      data: {
+        userId: userId ?? '',
+        type: TransactionType.BOOST_OFFER,
+        amount: (session.amount_total ?? 0) / 100,
+        currency: (session.currency ?? 'usd').toUpperCase(),
+        description: `Boosted offer ${offerId} for ${hours}h`,
+        status: TransactionStatus.COMPLETED,
+        paymentGateway: 'stripe',
+        gatewayTransactionId: session.id,
+        completedAt: new Date(),
+      },
+    });
+
+    logger.info(`Offer boosted via Checkout: ${offerId} for ${hours}h`);
   }
 }

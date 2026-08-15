@@ -30,6 +30,13 @@ class App {
       })
     );
     this.app.use(cors(corsOptions));
+    // Stripe requires the raw, unparsed request body to verify webhook
+    // signatures — this MUST be registered before express.json() and
+    // MUST match the exact mount path used in routes/index.ts.
+    this.app.use(
+      '/api/v1/subscriptions/webhook',
+      express.raw({ type: 'application/json' })
+    );
     this.app.use(express.json({ limit: '10mb' }));
     this.app.use(express.urlencoded({ extended: true, limit: '10mb' }));
     this.app.use(cookieParser(config.security.cookieSecret));

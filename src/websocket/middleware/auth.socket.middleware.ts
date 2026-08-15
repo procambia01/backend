@@ -1,10 +1,9 @@
 import { Socket } from 'socket.io';
-import { ExtendedError } from 'socket.io/dist/namespace';
 import { JwtUtil } from '@/utils/jwt.util';
 
 export async function authenticateSocket(
   socket: Socket,
-  next: (err?: ExtendedError) => void
+  next: (err?: Error) => void
 ) {
   try {
     const token = socket.handshake.auth.token;

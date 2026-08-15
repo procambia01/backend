@@ -1,4 +1,6 @@
+import { Server as SocketIOServer, Socket } from 'socket.io';
 import { SwapService } from '@/services/swap.service';
+import logger from '@/utils/logger.util';
 
 const swapService = new SwapService();
 
@@ -52,7 +54,6 @@ export function swapHandler(io: SocketIOServer, socket: Socket) {
   }) => {
     try {
       io.to(`swap:${data.swapId}`).emit('swap:meetup:updated', {
-        swapId: data.swapId,
         ...data,
         updatedBy: userId,
       });

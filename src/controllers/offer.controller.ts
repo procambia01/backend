@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { OfferService } from '@/services/offer.service';
 import ResponseUtil from '@/utils/response.util';
 import PaginationUtil from '@/utils/pagination.util';
+import { MONETIZATION } from '@/config/monetization';
 
 export class OfferController {
   private offerService: OfferService;
@@ -234,5 +235,24 @@ export class OfferController {
     const { reason, description } = req.body;
     await this.offerService.reportOffer(id, userId, reason, description);
     return ResponseUtil.success(res, null, 'Offer reported successfully');
+  };
+
+  /**
+   * Get available boost options and pricing
+   */
+  getBoostOptions = async (_req: Request, res: Response): Promise<Response> => {
+    return ResponseUtil.success(res, MONETIZATION.boost.options);
+  };
+
+  /**
+   * Create a Checkout session to boost this offer
+   */
+  createBoostCheckout = async (req: Request, res: Response): Promise<Response> => {
+    const { id } = req.params;
+    const userId = req.user!.userId;
+    const { optionIndex } = req.body as { optionIndex: number };
+    const origin = (req.headers.origin as string) ?? process.env.APP_URL ?? '';
+    const session = await this.offerService.createBoostCheckoutSession(id, userId, optionIndex, origin);
+    return ResponseUtil.success(res, { url: session.url });
   };
 }

@@ -85,6 +85,13 @@ router.post(
 );
 
 /**
+ * @route   GET /api/v1/offers/boost-options
+ * @desc    Get available boost durations/pricing
+ * @access  Private
+ */
+router.get('/boost-options', authenticate, asyncHandler(offerController.getBoostOptions));
+
+/**
  * @route   GET /api/v1/offers/:id
  * @desc    Get offer by ID
  * @access  Private
@@ -165,5 +172,12 @@ router.get('/:id/analytics', authenticate, asyncHandler(offerController.getOffer
  * @access  Private
  */
 router.post('/:id/report', authenticate, asyncHandler(offerController.reportOffer));
+
+/**
+ * @route   POST /api/v1/offers/:id/boost/checkout
+ * @desc    Create a Stripe Checkout session to boost this offer
+ * @access  Private (Owner only)
+ */
+router.post('/:id/boost/checkout', authenticate, asyncHandler(offerController.createBoostCheckout));
 
 export default router;

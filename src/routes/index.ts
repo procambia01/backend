@@ -13,6 +13,8 @@ import referralRoutes from './referral.routes';
 import analyticsRoutes from './analytics.routes';
 import adminRoutes from './admin.routes';
 import webhookRoutes from './webhook.routes';
+import subscriptionRoutes from './subscription.routes';
+import partnerRoutes from './partner.routes';
 
 const router = Router();
 
@@ -34,6 +36,8 @@ router.use(`${API_VERSION}/referrals`, referralRoutes);
 router.use(`${API_VERSION}/analytics`, analyticsRoutes);
 router.use(`${API_VERSION}/admin`, adminRoutes);
 router.use(`${API_VERSION}/webhooks`, webhookRoutes);
+router.use(`${API_VERSION}/subscriptions`, subscriptionRoutes);
+router.use(`${API_VERSION}/partner`, partnerRoutes);
 
 // API info route
 router.get('/', (req, res) => {
@@ -56,6 +60,7 @@ router.get('/', (req, res) => {
       analytics: `${API_VERSION}/analytics`,
       admin: `${API_VERSION}/admin`,
       webhooks: `${API_VERSION}/webhooks`,
+      subscriptions: `${API_VERSION}/subscriptions`,
     },
   });
 });

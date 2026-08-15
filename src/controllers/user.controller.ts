@@ -1,7 +1,8 @@
 import { Request, Response } from 'express';
 import { UserService } from '@/services/user.service';
 import ResponseUtil from '@/utils/response.util';
-import PaginationUtil from '@/utils/pagination.util';   
+import PaginationUtil from '@/utils/pagination.util';
+import { MONETIZATION } from '@/config/monetization';
 
 export class UserController {
   private userService: UserService;
@@ -238,6 +239,63 @@ export class UserController {
     const { id } = req.params;
     const status = await this.userService.getVerificationStatus(id);
     return ResponseUtil.success(res, status);
+  };
+
+  /**
+   * Create a Checkout session for the one-time verification fee
+   */
+  createVerificationCheckout = async (req: Request, res: Response): Promise<Response> => {
+    const userId = req.user!.userId;
+    const origin = (req.headers.origin as string) ?? process.env.APP_URL ?? '';
+    const session = await this.userService.createVerificationCheckoutSession(userId, origin);
+    return ResponseUtil.success(res, { url: session.url });
+  };
+
+  /**
+   * Get available partner API plans and pricing
+   */
+  getPartnerPlans = async (_req: Request, res: Response): Promise<Response> => {
+    return ResponseUtil.success(res, MONETIZATION.partner.plans);
+  };
+
+  /**
+   * Create a Checkout session for a business/partner API plan
+   */
+  createPartnerCheckout = async (req: Request, res: Response): Promise<Response> => {
+    const userId = req.user!.userId;
+    const { planId } = req.body as { planId: string };
+    const origin = (req.headers.origin as string) ?? process.env.APP_URL ?? '';
+    const session = await this.userService.createPartnerCheckoutSession(userId, planId, origin);
+    return ResponseUtil.success(res, { url: session.url });
+  };
+
+  /**
+   * List this partner's API keys (raw key never included)
+   */
+  listApiKeys = async (req: Request, res: Response): Promise<Response> => {
+    const userId = req.user!.userId;
+    const keys = await this.userService.listApiKeys(userId);
+    return ResponseUtil.success(res, keys);
+  };
+
+  /**
+   * Create an additional API key (raw key returned once)
+   */
+  createApiKey = async (req: Request, res: Response): Promise<Response> => {
+    const userId = req.user!.userId;
+    const { name } = req.body as { name: string };
+    const key = await this.userService.createApiKey(userId, name || 'New key');
+    return ResponseUtil.created(res, key, 'API key created — copy it now, it will not be shown again');
+  };
+
+  /**
+   * Revoke an API key
+   */
+  revokeApiKey = async (req: Request, res: Response): Promise<Response> => {
+    const userId = req.user!.userId;
+    const { keyId } = req.params;
+    await this.userService.revokeApiKey(userId, keyId);
+    return ResponseUtil.success(res, null, 'API key revoked');
   };
 
   /**

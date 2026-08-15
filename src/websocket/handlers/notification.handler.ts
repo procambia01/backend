@@ -1,4 +1,6 @@
+import { Server as SocketIOServer, Socket } from 'socket.io';
 import { NotificationService } from '@/services/notification.service';
+import logger from '@/utils/logger.util';
 
 const notificationService = new NotificationService();
 
