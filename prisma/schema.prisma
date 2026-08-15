@@ -687,6 +687,9 @@ model ApiKey {
   revokedAt DateTime?
   expiresAt DateTime?
 
+  // keyHash is already indexed by its @unique constraint above — a
+  // separate @@index([keyHash]) here would be a duplicate index on the
+  // same field, which Prisma's MongoDB connector rejects.
   @@index([userId])
 }
 

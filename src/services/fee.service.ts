@@ -238,7 +238,7 @@ export class FeeService {
           price_data: {
             currency: currency.toLowerCase(),
             unit_amount: Math.round(amount * 100),
-            product_data: { name: 'SwapFX platform fee' },
+            product_data: { name: 'Cashmova platform fee' },
           },
           quantity: 1,
         },

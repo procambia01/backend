@@ -1,24 +1,36 @@
 import { PrismaClient } from '@prisma/client';
-import { HelpersUtil } from '../src/utils/helpers.util';
+import { HelpersUtil } from '@/utils/helpers.util';
+import { config } from '@/config/env';
 
 const prisma = new PrismaClient();
 
 async function main() {
   console.log('Seeding database...');
 
-  // Create super admin
-  const superAdmin = await prisma.user.create({
-    data: {
+  if (!config.admin.email || !config.admin.password) {
+    throw new Error(
+      'SUPER_ADMIN_EMAIL and SUPER_ADMIN_PASSWORD must be set in your environment before seeding. ' +
+        'See .env.example.'
+    );
+  }
+
+  // upsert, not create — a seed script needs to be safe to re-run.
+  // With create(), running this a second time crashes on the unique
+  // `email` constraint the moment an admin already exists.
+  const superAdmin = await prisma.user.upsert({
+    where: { email: config.admin.email },
+    update: {},
+    create: {
       name: 'Super Admin',
-      email: 'admin@currencyexchange.com',
-      passwordHash: await HelpersUtil.hashPassword('Admin@123456'),
+      email: config.admin.email,
+      passwordHash: await HelpersUtil.hashPassword(config.admin.password),
       role: 'SUPER_ADMIN',
       emailVerified: true,
       isActive: true,
     },
   });
 
-  console.log('Created super admin:', superAdmin.email);
+  console.log('Super admin ready:', superAdmin.email);
 
   // Create system configs
   const configs = [
@@ -66,11 +78,15 @@ async function main() {
     },
   ];
 
-  for (const config of configs) {
-    await prisma.systemConfig.create({ data: config });
+  for (const cfg of configs) {
+    await prisma.systemConfig.upsert({
+      where: { key: cfg.key },
+      update: { value: cfg.value, category: cfg.category, description: cfg.description },
+      create: cfg,
+    });
   }
 
-  console.log('Created system configs');
+  console.log('System configs ready');
 
   // Add some sample currencies
   const currencies = ['USD', 'EUR', 'GBP', 'NGN', 'GHS', 'KES', 'ZAR'];

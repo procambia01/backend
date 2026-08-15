@@ -8,11 +8,11 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "outDir": "../dist/prisma",
-    "rootDir": ".",
+    "rootDir": "..",
     "paths": {
       "@/*": ["../src/*"]
     }
   },
-  "include": ["seed.ts"],
+  "include": ["seed.ts", "../src/**/*.ts"],
   "exclude": ["../node_modules"]
 }

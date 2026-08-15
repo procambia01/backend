@@ -35,7 +35,7 @@ export class CloudinaryService {
 
   async uploadAvatar(buffer: Buffer, userId: string) {
     return this.uploadImage(buffer, {
-      folder: 'swapfx/avatars',
+      folder: 'cashmova/avatars',
       publicId: `avatar_${userId}`,
       transformation: [{ width: 400, height: 400, crop: 'fill', gravity: 'face', quality: 'auto' }],
     });
@@ -43,7 +43,7 @@ export class CloudinaryService {
 
   async uploadDocument(buffer: Buffer, userId: string, docType: string) {
     return this.uploadImage(buffer, {
-      folder: 'swapfx/documents',
+      folder: 'cashmova/documents',
       publicId: `doc_${userId}_${docType}_${Date.now()}`,
       transformation: [{ width: 1200, quality: 'auto' }],
     });

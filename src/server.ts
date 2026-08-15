@@ -36,7 +36,6 @@ class Server {
       }
 
       initializeSocket(this.io);
-      logger.info('✅ WebSocket initialized');
 
       if (config.cron.enabled) {
         const { initializeCronJobs } = await import('@/cron');
@@ -122,6 +121,25 @@ class Server {
       this.shutdown('UNCAUGHT_EXCEPTION');
     });
     process.on('unhandledRejection', (reason: any) => {
+      // Redis is an optional dependency by design (see redis.ts / the
+      // "⚠️ Redis connection failed, some features may not work" log) —
+      // a transient Redis outage should degrade rate limiting/caching,
+      // not take the entire API down for every user. Known,
+      // recoverable Redis connection errors are logged and swallowed
+      // here; anything else still triggers a full shutdown, since an
+      // unhandled rejection of unknown origin can leave the process in
+      // a genuinely unsafe state.
+      const message = reason?.message ?? String(reason);
+      const isRecoverableRedisError =
+        /Connection is closed|ENOTFOUND|ECONNREFUSED|ETIMEDOUT/i.test(message) &&
+        (reason?.constructor?.name?.toLowerCase().includes('redis') ||
+          /redis/i.test(reason?.stack ?? ''));
+
+      if (isRecoverableRedisError) {
+        logger.warn(`⚠️ Unhandled Redis rejection (non-fatal, continuing): ${message}`);
+        return;
+      }
+
       logger.error('❌ Unhandled Rejection:', reason);
       this.shutdown('UNHANDLED_REJECTION');
     });

@@ -1,5 +1,5 @@
 {
-  "name": "backend",
+  "name": "cashmova-backend",
   "version": "1.0.0",
   "description": "Backend API for Currency Exchange Platform",
   "main": "dist/server.js",
