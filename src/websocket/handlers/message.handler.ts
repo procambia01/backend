@@ -48,6 +48,7 @@ export function messageHandler(io: SocketIOServer, socket: Socket) {
   );
 
   // Mark message as read
+  // TODO: Move to message service
   socket.on('message:read', async (data: { messageId: string }) => {
     try {
       await messageService.markAsRead(data.messageId, userId);
