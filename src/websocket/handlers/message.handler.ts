@@ -1,4 +1,5 @@
 import { Server as SocketIOServer, Socket } from 'socket.io';
+import { MessageType } from '@prisma/client';
 import { MessageService } from '@/services/message.service';
 import logger from '@/utils/logger.util';
 
@@ -20,38 +21,37 @@ export function messageHandler(io: SocketIOServer, socket: Socket) {
   });
 
   // Send message
-  socket.on('message:send', async (data: {
-    swapId: string;
-    content: string;
-    messageType?: string;
-  }) => {
-    try {
-      const message = await messageService.sendMessage(
-        userId,
-        data.swapId,
-        data.content,
-        data.messageType
-      );
+  socket.on(
+    'message:send',
+    async (data: { swapId: string; content: string; messageType?: MessageType }) => {
+      try {
+        const message = await messageService.sendMessage(
+          userId,
+          data.swapId,
+          data.content,
+          data.messageType
+        );
 
-      // Emit to swap room
-      io.to(`swap:${data.swapId}`).emit('message:new', {
-        message,
-        swapId: data.swapId,
-      });
+        // Emit to swap room
+        io.to(`swap:${data.swapId}`).emit('message:new', {
+          message,
+          swapId: data.swapId,
+        });
 
-      // Acknowledge sender
-      socket.emit('message:sent', { messageId: message.id });
-    } catch (error) {
-      logger.error('Error sending message:', error);
-      socket.emit('message:error', { error: 'Failed to send message' });
+        // Acknowledge sender
+        socket.emit('message:sent', { messageId: message.id });
+      } catch (error) {
+        logger.error('Error sending message:', error);
+        socket.emit('message:error', { error: 'Failed to send message' });
+      }
     }
-  });
+  );
 
   // Mark message as read
   socket.on('message:read', async (data: { messageId: string }) => {
     try {
       await messageService.markAsRead(data.messageId, userId);
-      
+
       // Emit to sender
       socket.to(`swap:${data.messageId}`).emit('message:read', {
         messageId: data.messageId,
@@ -63,27 +63,23 @@ export function messageHandler(io: SocketIOServer, socket: Socket) {
   });
 
   // Edit message
-  socket.on('message:edit', async (data: {
-    messageId: string;
-    content: string;
-    swapId: string;
-  }) => {
-    try {
-      // Edit logic here
-      io.to(`swap:${data.swapId}`).emit('message:edited', {
-        messageId: data.messageId,
-        content: data.content,
-      });
-    } catch (error) {
-      logger.error('Error editing message:', error);
+  socket.on(
+    'message:edit',
+    async (data: { messageId: string; content: string; swapId: string }) => {
+      try {
+        // Edit logic here
+        io.to(`swap:${data.swapId}`).emit('message:edited', {
+          messageId: data.messageId,
+          content: data.content,
+        });
+      } catch (error) {
+        logger.error('Error editing message:', error);
+      }
     }
-  });
+  );
 
   // Delete message
-  socket.on('message:delete', async (data: {
-    messageId: string;
-    swapId: string;
-  }) => {
+  socket.on('message:delete', async (data: { messageId: string; swapId: string }) => {
     try {
       // Delete logic here
       io.to(`swap:${data.swapId}`).emit('message:deleted', {
