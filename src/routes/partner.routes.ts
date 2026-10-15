@@ -1,50 +1,35 @@
-import { Router } from 'express';
-import { PartnerController } from '@/controllers/partner.controller';
-import { apiKeyAuth, requireScope } from '@/middleware/apiKeyAuth.middleware';
-import { asyncHandler } from '@/middleware/error.middleware';
+import { Router, z, h, ok } from './_h';
+import { apiKeyAuth } from '@/middleware/apiKeyAuth.middleware';
+import { RateLimitMiddleware as RL } from '@/middleware/rateLimit.middleware';
+import { validateParams, validateQuery } from '@/middleware/validate.middleware';
+import { offerSearchQuery, currencyCode } from '@/contracts';
+import { exchangeRateService } from '@/services/exchangeRate.service';
+import { marketService } from '@/services/market.service';
+import { offerService } from '@/services/offer.service';
+import { currencyService } from '@/services/currency.service';
+import ResponseUtil from '@/utils/response.util';
 
+/** Partner API: X-API-Key. Public marketplace data only — no personal, location or KYC data. */
 const router = Router();
-const partnerController = new PartnerController();
+const pair = z.object({ base: currencyCode, quote: currencyCode });
 
-// Every route here is authenticated via the X-API-Key header, not a JWT —
-// this is the surface partners (forex bureaus, remittance agents) call
-// from their own backend, not something an end user's app hits directly.
-router.use(apiKeyAuth);
-
-/**
- * @route   GET /api/v1/partner/rates
- * @desc    Reference exchange rate between two currencies
- * @access  Partner (API key, scope rates:read)
- */
-router.get('/rates', requireScope('rates:read'), asyncHandler(partnerController.getRate));
-
-/**
- * @route   GET /api/v1/partner/market-rates
- * @desc    Real peer-agreed rates from completed swaps in a corridor
- * @access  Partner (API key, scope rates:read)
- */
-router.get(
-  '/market-rates',
-  requireScope('rates:read'),
-  asyncHandler(partnerController.getMarketRates)
-);
-
-/**
- * @route   GET /api/v1/partner/offer-density
- * @desc    Anonymized active-offer counts by currency pair / location
- * @access  Partner (API key, scope offers:read)
- */
-router.get(
-  '/offer-density',
-  requireScope('offers:read'),
-  asyncHandler(partnerController.getOfferDensity)
-);
-
-/**
- * @route   GET /api/v1/partner/usage
- * @desc    This API key's own usage stats
- * @access  Partner (API key)
- */
-router.get('/usage', asyncHandler(partnerController.getUsage));
-
+router.get('/rates/:base/:quote', apiKeyAuth('rates:read'), RL.apiKey, validateParams(pair), h(async (req, res) => ok(res, await exchangeRateService.getRate(String(req.params.base), String(req.params.quote)))));
+router.get('/currencies', apiKeyAuth('rates:read'), RL.apiKey, h(async (_req, res) => ok(res, await currencyService.listActive())));
+router.get('/market/:base/:quote', apiKeyAuth('market:read'), RL.apiKey, validateParams(pair), h(async (req, res) => ok(res, await marketService.pairStats(String(req.params.base), String(req.params.quote), 7, undefined, 'ALL'))));
+router.get('/offers', apiKeyAuth('offers:read'), RL.apiKey, validateQuery(offerSearchQuery), h(async (req, res) => {
+  const q = req.query as never as z.infer<typeof offerSearchQuery>;
+  const r = await offerService.search({ ...q, latitude: undefined, longitude: undefined, radiusKm: undefined });
+  const items = r.items.map((o) => ({
+    id: o.id,
+    haveCurrency: o.haveCurrency,
+    wantCurrency: o.wantCurrency,
+    availableAmount: o.availableAmount,
+    exchangeRate: o.exchangeRate,
+    country: o.area.country,
+    city: o.area.city,
+    availableUntil: o.availableUntil,
+    sponsored: o.sponsored ?? false,
+  }));
+  ResponseUtil.paginated(res, items, q.page, q.perPage, r.total);
+}));
 export default router;

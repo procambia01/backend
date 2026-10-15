@@ -2,7 +2,7 @@
 module.exports = {
   apps: [
     {
-      name: 'currency-exchange-api',
+      name: 'cashmouver-api',
       script: './dist/server.js',
       instances: 'max',
       exec_mode: 'cluster',

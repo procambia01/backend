@@ -1,213 +1,162 @@
+import type { ErrorCode } from '@/contracts';
+
 export class AppError extends Error {
   public readonly statusCode: number;
   public readonly isOperational: boolean;
-  public readonly errors?: any[];
+  public readonly code: ErrorCode;
+  public readonly details?: unknown;
 
   constructor(
     message: string,
-    statusCode: number = 500,
-    isOperational: boolean = true,
-    errors?: any[]
+    statusCode = 500,
+    code: ErrorCode = 'INTERNAL_ERROR',
+    details?: unknown,
+    isOperational = true
   ) {
     super(message);
-    
+    this.name = new.target.name;
     this.statusCode = statusCode;
+    this.code = code;
+    this.details = details;
     this.isOperational = isOperational;
-    this.errors = errors;
-
-    Error.captureStackTrace(this, this.constructor);
+    Error.captureStackTrace?.(this, this.constructor);
   }
 }
 
 export class BadRequestError extends AppError {
-  constructor(message: string = 'Bad Request', errors?: any[]) {
-    super(message, 400, true, errors);
+  constructor(message = 'Bad request', details?: unknown, code: ErrorCode = 'BAD_REQUEST') {
+    super(message, 400, code, details);
   }
 }
-
-export class UnauthorizedError extends AppError {
-  constructor(message: string = 'Unauthorized') {
-    super(message, 401, true);
-  }
-}
-
-export class ForbiddenError extends AppError {
-  constructor(message: string = 'Forbidden') {
-    super(message, 403, true);
-  }
-}
-
-export class NotFoundError extends AppError {
-  constructor(message: string = 'Resource not found') {
-    super(message, 404, true);
-  }
-}
-
-export class ConflictError extends AppError {
-  constructor(message: string = 'Conflict') {
-    super(message, 409, true);
-  }
-}
-
 export class ValidationError extends AppError {
-  constructor(message: string = 'Validation failed', errors?: any[]) {
-    super(message, 422, true, errors);
+  constructor(message = 'Validation failed', details?: unknown) {
+    super(message, 422, 'VALIDATION_ERROR', details);
   }
 }
-
+export class UnauthorizedError extends AppError {
+  constructor(message = 'Unauthorized', code: ErrorCode = 'UNAUTHORIZED') {
+    super(message, 401, code);
+  }
+}
+export class ReauthRequiredError extends UnauthorizedError {
+  constructor() {
+    super('Please confirm your password to continue', 'REAUTH_REQUIRED');
+  }
+}
+export class ForbiddenError extends AppError {
+  constructor(message = 'Forbidden', code: ErrorCode = 'FORBIDDEN', details?: unknown) {
+    super(message, 403, code, details);
+  }
+}
+export class NotFoundError extends AppError {
+  constructor(message = 'Resource not found') {
+    super(message, 404, 'NOT_FOUND');
+  }
+}
+export class ConflictError extends AppError {
+  constructor(message = 'Conflict', code: ErrorCode = 'CONFLICT', details?: unknown) {
+    super(message, 409, code, details);
+  }
+}
+export class InvalidStateError extends ConflictError {
+  constructor(message = 'This action is not allowed in the current state', details?: unknown) {
+    super(message, 'INVALID_STATE', details);
+  }
+}
 export class TooManyRequestsError extends AppError {
-  constructor(message: string = 'Too many requests') {
-    super(message, 429, true);
+  constructor(message = 'Too many requests', details?: unknown) {
+    super(message, 429, 'RATE_LIMITED', details);
   }
 }
-
-export class InternalServerError extends AppError {
-  constructor(message: string = 'Internal server error') {
-    super(message, 500, true);
+export class LimitExceededError extends AppError {
+  constructor(message: string, details?: unknown) {
+    super(message, 403, 'LIMIT_EXCEEDED', details);
   }
 }
-
+export class PlanRequiredError extends AppError {
+  constructor(message = 'This feature requires a paid plan', details?: unknown) {
+    super(message, 403, 'PLAN_REQUIRED', details);
+  }
+}
+export class VerificationRequiredError extends AppError {
+  constructor(message = 'Identity verification is required for this action') {
+    super(message, 403, 'VERIFICATION_REQUIRED');
+  }
+}
+export class UploadInvalidError extends AppError {
+  constructor(message = 'Invalid upload') {
+    super(message, 400, 'UPLOAD_INVALID');
+  }
+}
+export class PaymentMismatchError extends AppError {
+  constructor(message = 'Payment does not match the expected amount') {
+    super(message, 409, 'PAYMENT_MISMATCH');
+  }
+}
+export class RiskBlockedError extends AppError {
+  constructor(message = 'This action is temporarily unavailable on your account') {
+    super(message, 403, 'RISK_BLOCKED');
+  }
+}
 export class ServiceUnavailableError extends AppError {
-  constructor(message: string = 'Service unavailable') {
-    super(message, 503, true);
+  constructor(message = 'Service unavailable') {
+    super(message, 503, 'SERVICE_UNAVAILABLE');
+  }
+}
+export class InternalServerError extends AppError {
+  constructor(message = 'Internal server error') {
+    super(message, 500, 'INTERNAL_ERROR');
   }
 }
 
-// Custom business logic errors
+// Named business errors
 export class EmailAlreadyExistsError extends ConflictError {
   constructor() {
-    super('Email already exists');
+    super('An account with this email already exists');
   }
 }
-
-export class PhoneAlreadyExistsError extends ConflictError {
-  constructor() {
-    super('Phone number already exists');
-  }
-}
-
 export class InvalidCredentialsError extends UnauthorizedError {
-  constructor() {
-    super('Invalid email or password');
+  constructor(message = 'Invalid email or password') {
+    super(message);
   }
 }
-
-export class AccountNotVerifiedError extends ForbiddenError {
-  constructor() {
-    super('Please verify your email address');
-  }
-}
-
-export class AccountBannedError extends ForbiddenError {
-  constructor(reason?: string) {
-    super(reason || 'Your account has been banned');
-  }
-}
-
-export class AccountSuspendedError extends ForbiddenError {
-  constructor() {
-    super('Your account has been suspended');
-  }
-}
-
 export class InvalidTokenError extends UnauthorizedError {
   constructor() {
     super('Invalid or expired token');
   }
 }
-
 export class TokenExpiredError extends UnauthorizedError {
   constructor() {
-    super('Token has expired');
+    super('Token has expired', 'TOKEN_EXPIRED');
   }
 }
-
-export class InsufficientPermissionsError extends ForbiddenError {
-  constructor() {
-    super('Insufficient permissions');
+export class AccountBannedError extends ForbiddenError {
+  constructor(reason?: string) {
+    super(reason ? `Your account has been banned: ${reason}` : 'Your account has been banned');
   }
 }
-
+export class AccountSuspendedError extends ForbiddenError {
+  constructor(reason?: string) {
+    super(reason ? `Your account has been suspended: ${reason}` : 'Your account has been suspended');
+  }
+}
 export class UserNotFoundError extends NotFoundError {
   constructor() {
     super('User not found');
   }
 }
-
-export class OfferNotFoundError extends NotFoundError {
-  constructor() {
-    super('Offer not found');
+export class OfferUnavailableError extends AppError {
+  constructor(message = 'This offer is no longer available') {
+    super(message, 409, 'OFFER_UNAVAILABLE');
   }
 }
-
-export class SwapNotFoundError extends NotFoundError {
-  constructor() {
-    super('Swap not found');
+export class InsufficientAvailabilityError extends AppError {
+  constructor(message = 'The requested amount is no longer available on this offer', details?: unknown) {
+    super(message, 409, 'INSUFFICIENT_AVAILABILITY', details);
   }
 }
-
-export class InvalidSwapStatusError extends BadRequestError {
-  constructor(message: string = 'Invalid swap status for this operation') {
-    super(message);
-  }
-}
-
-export class MaxSwapAmountExceededError extends BadRequestError {
-  constructor(maxAmount: number) {
-    super(`Maximum swap amount is ${maxAmount}`);
-  }
-}
-
-export class InsufficientFundsError extends BadRequestError {
-  constructor() {
-    super('Insufficient funds');
-  }
-}
-
-export class PaymentFailedError extends BadRequestError {
-  constructor(message: string = 'Payment failed') {
-    super(message);
-  }
-}
-
-export class FileUploadError extends BadRequestError {
-  constructor(message: string = 'File upload failed') {
-    super(message);
-  }
-}
-
-export class InvalidFileTypeError extends BadRequestError {
-  constructor(allowedTypes: string[]) {
-    super(`Invalid file type. Allowed types: ${allowedTypes.join(', ')}`);
-  }
-}
-
-export class FileSizeTooLargeError extends BadRequestError {
-  constructor(maxSize: number) {
-    super(`File size too large. Maximum size: ${maxSize} bytes`);
-  }
-}
-
-export class LocationNotFoundError extends BadRequestError {
-  constructor() {
-    super('Location not found');
-  }
-}
-
-export class RateLimitExceededError extends TooManyRequestsError {
-  constructor() {
-    super('Rate limit exceeded. Please try again later');
-  }
-}
-
-export class DatabaseError extends InternalServerError {
-  constructor(message: string = 'Database operation failed') {
-    super(message);
-  }
-}
-
-export class ExternalServiceError extends ServiceUnavailableError {
-  constructor(service: string) {
-    super(`${service} is currently unavailable`);
+export class RateMismatchError extends AppError {
+  constructor(message = 'The amounts do not match the exchange rate') {
+    super(message, 422, 'RATE_MISMATCH');
   }
 }

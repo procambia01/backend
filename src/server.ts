@@ -3,7 +3,7 @@ import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import app from './app';
 import { config } from '@/config/env';
-import { connectDatabase, disconnectDatabase } from '@/config/database';
+import { connectDatabase, disconnectDatabase, ensureGeoIndexes } from '@/config/database';
 import redisClient from '@/config/redis';
 import logger from '@/utils/logger.util';
 import { initializeSocket } from '@/websocket/socket';
@@ -27,6 +27,7 @@ class Server {
     try {
       await connectDatabase();
       logger.info('✅ Database connected');
+      await ensureGeoIndexes();
 
       const redisHealthy = await redisClient.healthCheck();
       if (redisHealthy) {
@@ -38,9 +39,9 @@ class Server {
       initializeSocket(this.io);
 
       if (config.cron.enabled) {
-        const { initializeCronJobs } = await import('@/cron');
-        initializeCronJobs();
-        logger.info('✅ Cron jobs initialized');
+        const { startScheduler } = await import('@/jobs/scheduler');
+        startScheduler();
+        logger.info('✅ Scheduler started');
       }
 
       logger.info('✅ Server initialization complete');
@@ -95,6 +96,8 @@ class Server {
     logger.info(`\n🛑 Received ${signal}. Starting graceful shutdown...`);
 
     try {
+      const { stopScheduler } = await import('@/jobs/scheduler');
+      stopScheduler();
       this.httpServer.close(() => {
         logger.info('✅ HTTP server closed');
       });

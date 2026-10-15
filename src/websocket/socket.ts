@@ -1,96 +1,59 @@
 import { Server as SocketIOServer, Socket } from 'socket.io';
+import { prisma } from '@/config/database';
 import { JwtUtil } from '@/utils/jwt.util';
 import logger from '@/utils/logger.util';
-import { messageHandler } from './handlers/message.handler';
-import { notificationHandler } from './handlers/notification.handler';
-import { swapHandler } from './handlers/swap.handler';
-import { locationHandler } from './handlers/location.handler';
+import { setIo } from '@/lib/realtime';
 
-// Store connected users
-const connectedUsers = new Map<string, string>(); // userId -> socketId
+/**
+ * Realtime is a notification channel only: every state change is persisted by
+ * the REST API first. Sockets authenticate with the same short-lived access
+ * token, are tied to a live session, and may only join rooms for swaps they
+ * take part in. No global presence is broadcast (privacy).
+ */
+export function initializeSocket(io: SocketIOServer): void {
+  setIo(io);
 
-export function initializeSocket(io: SocketIOServer) {
-  // Authentication middleware
-  io.use(async (socket: Socket, next) => {
+  io.use(async (socket, next) => {
     try {
-      const token = socket.handshake.auth.token || socket.handshake.headers.authorization?.split(' ')[1];
-      
-      if (!token) {
-        return next(new Error('Authentication required'));
+      const raw = socket.handshake.auth?.token ?? JwtUtilHeader(socket);
+      const claims = JwtUtil.verifyAccessToken(String(raw));
+      const [session, user] = await Promise.all([
+        prisma.authSession.findUnique({ where: { id: claims.sid } }),
+        prisma.user.findUnique({ where: { id: claims.sub }, select: { id: true, tokenVersion: true, isActive: true, isBanned: true, deletedAt: true } }),
+      ]);
+      if (!session || session.revokedAt || session.expiresAt <= new Date() || !user || !user.isActive || user.isBanned || user.deletedAt || user.tokenVersion !== claims.tv) {
+        return next(new Error('unauthorized'));
       }
-
-      const decoded = JwtUtil.verifyAccessToken(token);
-      socket.data.userId = decoded.userId;
-      socket.data.email = decoded.email;
-      socket.data.role = decoded.role;
-      
+      socket.data.userId = user.id;
+      socket.data.sessionId = session.id;
       next();
-    } catch (error) {
-      logger.error('Socket authentication error:', error);
-      next(new Error('Invalid token'));
+    } catch {
+      next(new Error('unauthorized'));
     }
   });
 
   io.on('connection', (socket: Socket) => {
-    const userId = socket.data.userId;
-    
-    logger.info(`User connected: ${userId} (${socket.id})`);
-    
-    // Store user connection
-    connectedUsers.set(userId, socket.id);
-    
-    // Join user's personal room
-    socket.join(`user:${userId}`);
-    
-    // Emit online status
-    io.emit('user:online', { userId });
+    const userId = socket.data.userId as string;
+    void socket.join(`user:${userId}`);
 
-    // Register handlers
-    messageHandler(io, socket);
-    notificationHandler(io, socket);
-    swapHandler(io, socket);
-    locationHandler(io, socket);
-
-    // Handle typing indicator
-    socket.on('typing:start', (data: { swapId: string }) => {
-      socket.to(`swap:${data.swapId}`).emit('typing:start', {
-        userId,
-        swapId: data.swapId,
-      });
+    socket.on('swap:join', async (swapId: unknown, ack?: (r: { ok: boolean }) => void) => {
+      if (typeof swapId !== 'string' || !/^[a-f0-9]{24}$/i.test(swapId)) return ack?.({ ok: false });
+      const swap = await prisma.swap.findFirst({ where: { id: swapId, OR: [{ initiatorId: userId }, { receiverId: userId }] }, select: { id: true } });
+      if (!swap) return ack?.({ ok: false });
+      await socket.join(`swap:${swapId}`);
+      ack?.({ ok: true });
     });
-
-    socket.on('typing:stop', (data: { swapId: string }) => {
-      socket.to(`swap:${data.swapId}`).emit('typing:stop', {
-        userId,
-        swapId: data.swapId,
-      });
+    socket.on('swap:leave', (swapId: unknown) => {
+      if (typeof swapId === 'string') void socket.leave(`swap:${swapId}`);
     });
-
-    // Handle disconnect
-    socket.on('disconnect', () => {
-      logger.info(`User disconnected: ${userId} (${socket.id})`);
-      connectedUsers.delete(userId);
-      io.emit('user:offline', { userId });
+    socket.on('typing', (p: { swapId?: string; typing?: boolean }) => {
+      if (!p?.swapId || !socket.rooms.has(`swap:${p.swapId}`)) return;
+      socket.to(`swap:${p.swapId}`).emit('typing', { swapId: p.swapId, userId, typing: !!p.typing });
     });
-
-    // Handle errors
-    socket.on('error', (error) => {
-      logger.error('Socket error:', error);
-    });
+    socket.on('disconnect', () => logger.debug('socket disconnected', { userId }));
   });
-
-  logger.info('✅ WebSocket initialized');
 }
 
-// Helper functions
-export function getSocketIdByUserId(userId: string): string | undefined {
-  return connectedUsers.get(userId);
-}
-
-export function isUserOnline(userId: string): boolean {
-  return connectedUsers.has(userId);
-}
-
-export function getOnlineUsers(): string[] {
-  return Array.from(connectedUsers.keys());
+function JwtUtilHeader(socket: Socket): string {
+  return JwtUtil.extractTokenFromHeader(socket.handshake.headers.authorization) ?? '';
 }

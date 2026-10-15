@@ -5,6 +5,7 @@ import { Request } from 'express';
 import redisClient from '@/config/redis';
 import { config } from '@/config/env';
 import { TooManyRequestsError } from '@/utils/error.util';
+import type { Request as ExpressRequest } from 'express';
 import logger from '@/utils/logger.util';
 
 const client = redisClient.getClient();
@@ -31,6 +32,17 @@ class ResilientRedisStore implements Store {
 
   constructor(prefix: string) {
     this.inner = new RedisStore({ sendCommand, prefix });
+    // The store eagerly loads its Lua scripts; if Redis is down at boot those promises reject with nobody
+    // awaiting them. They are retried on first use, so just stop them surfacing as unhandled rejections.
+    const loaded = this.inner as unknown as { incrementScriptSha?: Promise<unknown>; getScriptSha?: Promise<unknown> };
+    loaded.incrementScriptSha?.catch(() => undefined);
+    loaded.getScriptSha?.catch(() => undefined);
+  }
+
+  /** express-rate-limit hands the window length to the store here; without forwarding it the Redis
+   *  script would receive `undefined` as its TTL and every increment would fail (and fail open). */
+  init(options: Parameters<NonNullable<Store['init']>>[0]): void {
+    this.inner.init(options);
   }
 
   private warnOnce(context: string, error: unknown) {
@@ -79,164 +91,78 @@ class ResilientRedisStore implements Store {
   }
 }
 
-export class RateLimitMiddleware {
-  static general = rateLimit({
-    windowMs: config.rateLimit.windowMs,
-    max: config.rateLimit.maxRequests,
-    standardHeaders: true,
-    legacyHeaders: false,
-    store: new ResilientRedisStore('rl:general:'),
-    handler: () => {
-      throw new TooManyRequestsError('Too many requests, please try again later');
-    },
-    skip: (req: Request) => req.user?.role === 'SUPER_ADMIN',
-  });
 
-  static auth = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 5,
-    standardHeaders: true,
-    legacyHeaders: false,
-    store: new ResilientRedisStore('rl:auth:'),
-    handler: () => {
-      throw new TooManyRequestsError('Too many authentication attempts, please try again later');
-    },
-  });
+type KeyFn = (req: Request) => string;
 
-  static login = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: config.isDevelopment ? 1000 : 10,
-    standardHeaders: true,
-    legacyHeaders: false,
-    store: new ResilientRedisStore('rl:login:'),
-    handler: () => {
-      throw new TooManyRequestsError('Too many login attempts, please try again later');
-    },
-    keyGenerator: (req: Request) => req.body.email || req.ip || 'unknown',
-  });
+const byUserOrIp: KeyFn = (req) => req.user?.userId ?? req.ip ?? 'unknown';
+const byIp: KeyFn = (req) => req.ip ?? 'unknown';
+const byEmailAndIp: KeyFn = (req) => `${String(req.body?.email ?? '').toLowerCase()}|${req.ip ?? ''}`;
 
-  static register = rateLimit({
-    windowMs: 60 * 60 * 1000,
-    max: config.isDevelopment ? 100 : 5, // relaxed in dev for testing
-    standardHeaders: true,
-    legacyHeaders: false,
-    store: new ResilientRedisStore('rl:register:'),
-    handler: () => {
-      throw new TooManyRequestsError('Too many registration attempts, please try again later');
-    },
-    skip: () => config.isDevelopment, // skip entirely in development
-  });
+interface LimiterOpts {
+  prefix: string;
+  windowMs: number;
+  max: number | ((req: Request) => number);
+  message: string;
+  key?: KeyFn;
+}
 
-  static passwordReset = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 3,
+/** Throws via `next` so the standard error envelope (code RATE_LIMITED) is returned. */
+function limiter(o: LimiterOpts) {
+  return rateLimit({
+    windowMs: o.windowMs,
+    limit: typeof o.max === 'function' ? (o.max as (req: ExpressRequest) => number) : o.max,
     standardHeaders: true,
     legacyHeaders: false,
-    store: new ResilientRedisStore('rl:password-reset:'),
-    handler: () => {
-      throw new TooManyRequestsError('Too many password reset attempts, please try again later');
-    },
-    keyGenerator: (req: Request) => req.body.email || req.ip || 'unknown',
-  });
-
-  static emailVerification = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 3,
-    standardHeaders: true,
-    legacyHeaders: false,
-    store: new ResilientRedisStore('rl:email-verify:'),
-    handler: () => {
-      throw new TooManyRequestsError('Too many verification attempts, please try again later');
-    },
-  });
-
-  static sms = rateLimit({
-    windowMs: 60 * 60 * 1000,
-    max: 5,
-    standardHeaders: true,
-    legacyHeaders: false,
-    store: new ResilientRedisStore('rl:sms:'),
-    handler: () => {
-      throw new TooManyRequestsError('Too many SMS requests, please try again later');
-    },
-  });
-
-  static upload = rateLimit({
-    windowMs: 60 * 60 * 1000,
-    max: 20,
-    standardHeaders: true,
-    legacyHeaders: false,
-    store: new ResilientRedisStore('rl:upload:'),
-    handler: () => {
-      throw new TooManyRequestsError('Too many upload attempts, please try again later');
-    },
-    skip: (req: Request) =>
-      req.user?.role === 'PREMIUM' ||
-      req.user?.role === 'ADMIN' ||
-      req.user?.role === 'SUPER_ADMIN',
-  });
-
-  static createOffer = rateLimit({
-    windowMs: 60 * 60 * 1000,
-    max: 10,
-    standardHeaders: true,
-    legacyHeaders: false,
-    store: new ResilientRedisStore('rl:create-offer:'),
-    handler: () => {
-      throw new TooManyRequestsError('Too many offers created, please try again later');
-    },
-    keyGenerator: (req: Request) => req.user?.userId || req.ip || 'unknown',
-    skip: (req: Request) => req.user?.role === 'PREMIUM' || req.user?.role === 'BUSINESS',
-  });
-
-  static initiateSwap = rateLimit({
-    windowMs: 60 * 60 * 1000,
-    max: 20,
-    standardHeaders: true,
-    legacyHeaders: false,
-    store: new ResilientRedisStore('rl:initiate-swap:'),
-    handler: () => {
-      throw new TooManyRequestsError('Too many swap requests, please try again later');
-    },
-    keyGenerator: (req: Request) => req.user?.userId || req.ip || 'unknown',
-  });
-
-  static sendMessage = rateLimit({
-    windowMs: 60 * 1000,
-    max: 30,
-    standardHeaders: true,
-    legacyHeaders: false,
-    store: new ResilientRedisStore('rl:send-message:'),
-    handler: () => {
-      throw new TooManyRequestsError('Too many messages sent, please slow down');
-    },
-    keyGenerator: (req: Request) => req.user?.userId || req.ip || 'unknown',
-  });
-
-  static apiKey = rateLimit({
-    windowMs: 60 * 60 * 1000,
-    max: 10000,
-    standardHeaders: true,
-    legacyHeaders: false,
-    store: new ResilientRedisStore('rl:api-key:'),
-    handler: () => {
-      throw new TooManyRequestsError('API rate limit exceeded');
-    },
-    keyGenerator: (req: Request) => (req.headers['x-api-key'] as string) || req.ip || 'unknown',
+    store: new ResilientRedisStore(`rl:${o.prefix}:`),
+    keyGenerator: (req) => (o.key ?? byIp)(req as Request),
+    skip: () => config.isTest,
+    handler: (_req, _res, next) => next(new TooManyRequestsError(o.message)),
   });
 }
 
-export const generalRateLimit = RateLimitMiddleware.general;
-export const authRateLimit = RateLimitMiddleware.auth;
-export const loginRateLimit = RateLimitMiddleware.login;
-export const registerRateLimit = RateLimitMiddleware.register;
-export const passwordResetRateLimit = RateLimitMiddleware.passwordReset;
-export const emailVerificationRateLimit = RateLimitMiddleware.emailVerification;
-export const smsRateLimit = RateLimitMiddleware.sms;
-export const uploadRateLimit = RateLimitMiddleware.upload;
-export const createOfferRateLimit = RateLimitMiddleware.createOffer;
-export const initiateSwapRateLimit = RateLimitMiddleware.initiateSwap;
-export const sendMessageRateLimit = RateLimitMiddleware.sendMessage;
-export const apiKeyRateLimit = RateLimitMiddleware.apiKey;
+const MIN = 60_000;
+const HOUR = 60 * MIN;
+
+/** Plan-aware multiplier: paid plans get more headroom, but nobody is unlimited. */
+const planFactor = (req: Request) => (req.user?.planTier === 'BUSINESS' ? 4 : req.user?.planTier === 'PREMIUM' ? 2 : 1);
+
+export class RateLimitMiddleware {
+  static general = limiter({
+    prefix: 'general',
+    windowMs: config.rateLimit.windowMs,
+    max: (req) => config.rateLimit.maxRequests * planFactor(req),
+    message: 'Too many requests, please try again later',
+    key: byUserOrIp,
+  });
+
+  /** Credential stuffing: per email+IP, tight. */
+  static login = limiter({ prefix: 'login', windowMs: 15 * MIN, max: 10, message: 'Too many login attempts, please try again later', key: byEmailAndIp });
+  static loginByIp = limiter({ prefix: 'login-ip', windowMs: 15 * MIN, max: 50, message: 'Too many login attempts, please try again later' });
+  static register = limiter({ prefix: 'register', windowMs: HOUR, max: 10, message: 'Too many registration attempts, please try again later' });
+  static refresh = limiter({ prefix: 'refresh', windowMs: 15 * MIN, max: 60, message: 'Too many token refresh attempts' });
+  static passwordReset = limiter({ prefix: 'pwreset', windowMs: 15 * MIN, max: 5, message: 'Too many password reset attempts, please try again later', key: byEmailAndIp });
+  static emailVerification = limiter({ prefix: 'emailverify', windowMs: 15 * MIN, max: 5, message: 'Too many verification attempts, please try again later', key: byUserOrIp });
+  static reauth = limiter({ prefix: 'reauth', windowMs: 15 * MIN, max: 10, message: 'Too many re-authentication attempts', key: byUserOrIp });
+  static otpRequest = limiter({ prefix: 'otp-req', windowMs: HOUR, max: 5, message: 'Too many verification codes requested', key: byUserOrIp });
+  static otpVerify = limiter({ prefix: 'otp-verify', windowMs: 15 * MIN, max: 10, message: 'Too many verification attempts', key: byUserOrIp });
+  static twoFactor = limiter({ prefix: '2fa', windowMs: 15 * MIN, max: 10, message: 'Too many two-factor attempts', key: byUserOrIp });
+  static upload = limiter({ prefix: 'upload', windowMs: HOUR, max: (req) => 20 * planFactor(req), message: 'Too many uploads, please try again later', key: byUserOrIp });
+  static createOffer = limiter({ prefix: 'create-offer', windowMs: HOUR, max: (req) => 10 * planFactor(req), message: 'Too many offers created, please try again later', key: byUserOrIp });
+  static initiateSwap = limiter({ prefix: 'swap-init', windowMs: HOUR, max: (req) => 20 * planFactor(req), message: 'Too many swap requests, please try again later', key: byUserOrIp });
+  static sendMessage = limiter({ prefix: 'message', windowMs: MIN, max: 30, message: 'You are sending messages too quickly', key: byUserOrIp });
+  static checkout = limiter({ prefix: 'checkout', windowMs: 10 * MIN, max: 15, message: 'Too many checkout attempts', key: byUserOrIp });
+  static report = limiter({ prefix: 'report', windowMs: HOUR, max: 20, message: 'Too many reports submitted', key: byUserOrIp });
+  static publicSearch = limiter({ prefix: 'search', windowMs: MIN, max: 60, message: 'Too many searches, please slow down', key: byUserOrIp });
+  static admin = limiter({ prefix: 'admin', windowMs: MIN, max: 120, message: 'Too many admin requests', key: byUserOrIp });
+
+  /** API-key consumers: limit is the key's own configured limit per minute. */
+  static apiKey = limiter({
+    prefix: 'apikey',
+    windowMs: MIN,
+    max: (req) => req.apiKey?.rateLimitPerMinute ?? 30,
+    message: 'API rate limit exceeded',
+    key: (req) => req.apiKey?.id ?? req.ip ?? 'unknown',
+  });
+}
 
 export default RateLimitMiddleware;

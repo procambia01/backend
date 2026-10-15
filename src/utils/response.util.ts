@@ -1,205 +1,44 @@
-// src/utils/response.util.ts
 import { Response } from 'express';
+import type { PageMeta } from '@/contracts';
 
-export interface ApiResponse<T = any> {
-  success: boolean;
-  message: string;
-  data?: T;
-  errors?: any[];
-  meta?: {
-    page?: number;
-    perPage?: number;
-    total?: number;
-    totalPages?: number;
-    hasMore?: boolean;
-  };
-  timestamp: string;
+/** JSON replacer: BigInt would otherwise throw; emit decimal strings. */
+export const jsonSafe = (_k: string, v: unknown) => (typeof v === 'bigint' ? v.toString() : v);
+
+export function pageMeta(page: number, perPage: number, total: number): PageMeta {
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
+  return { page, perPage, total, totalPages, hasNextPage: page < totalPages, hasPrevPage: page > 1 };
 }
 
+/**
+ * Standard envelope for every response:
+ *   { success: true,  data, meta, error: null }
+ *   { success: false, data: null, error: { code, message, details } }
+ */
 export class ResponseUtil {
-  /**
-   * Send success response
-   */
-  static success<T>(
-    res: Response,
-    data?: T,
-    message: string = 'Success',
-    statusCode: number = 200
-  ): Response {
-    const response: ApiResponse<T> = {
-      success: true,
-      message,
-      data,
-      timestamp: new Date().toISOString(),
-    };
-
-    return res.status(statusCode).json(response);
+  static success<T>(res: Response, data?: T, _message?: string, statusCode = 200, meta: Record<string, unknown> = {}): Response {
+    return res
+      .status(statusCode)
+      .type('application/json')
+      .send(JSON.stringify({ success: true, data: data ?? null, meta, error: null }, jsonSafe));
   }
 
-  /**
-   * Send error response
-   */
-  static error(
-    res: Response,
-    message: string = 'Error',
-    statusCode: number = 500,
-    errors?: any[]
-  ): Response {
-    const response: ApiResponse = {
-      success: false,
-      message,
-      errors,
-      timestamp: new Date().toISOString(),
-    };
-
-    return res.status(statusCode).json(response);
+  static created<T>(res: Response, data: T, _message?: string): Response {
+    return ResponseUtil.success(res, data, undefined, 201);
   }
 
-  /**
-   * Send paginated response
-   */
-  static paginated<T>(
-    res: Response,
-    data: T[],
-    page: number,
-    perPage: number,
-    total: number,
-    message: string = 'Success'
-  ): Response {
-    const totalPages = Math.ceil(total / perPage);
-    const hasMore = page < totalPages;
-
-    const response: ApiResponse<T[]> = {
-      success: true,
-      message,
-      data,
-      meta: {
-        page,
-        perPage,
-        total,
-        totalPages,
-        hasMore,
-      },
-      timestamp: new Date().toISOString(),
-    };
-
-    // Set pagination headers
-    res.setHeader('X-Total-Count', total);
-    res.setHeader('X-Page', page);
-    res.setHeader('X-Per-Page', perPage);
-    res.setHeader('X-Total-Pages', totalPages);
-
-    return res.status(200).json(response);
+  static paginated<T>(res: Response, data: T[], page: number, perPage: number, total: number): Response {
+    return ResponseUtil.success(res, data, undefined, 200, pageMeta(page, perPage, total) as unknown as Record<string, unknown>);
   }
 
-  /**
-   * Send created response (201)
-   */
-  static created<T>(
-    res: Response,
-    data: T,
-    message: string = 'Resource created successfully'
-  ): Response {
-    return this.success(res, data, message, 201);
-  }
-
-  /**
-   * Send no content response (204)
-   */
   static noContent(res: Response): Response {
     return res.status(204).send();
   }
 
-  /**
-   * Send bad request response (400)
-   */
-  static badRequest(
-    res: Response,
-    message: string = 'Bad request',
-    errors?: any[]
-  ): Response {
-    return this.error(res, message, 400, errors);
-  }
-
-  /**
-   * Send unauthorized response (401)
-   */
-  static unauthorized(
-    res: Response,
-    message: string = 'Unauthorized'
-  ): Response {
-    return this.error(res, message, 401);
-  }
-
-  /**
-   * Send forbidden response (403)
-   */
-  static forbidden(
-    res: Response,
-    message: string = 'Forbidden'
-  ): Response {
-    return this.error(res, message, 403);
-  }
-
-  /**
-   * Send not found response (404)
-   */
-  static notFound(
-    res: Response,
-    message: string = 'Resource not found'
-  ): Response {
-    return this.error(res, message, 404);
-  }
-
-  /**
-   * Send conflict response (409)
-   */
-  static conflict(
-    res: Response,
-    message: string = 'Conflict'
-  ): Response {
-    return this.error(res, message, 409);
-  }
-
-  /**
-   * Send validation error response (422)
-   */
-  static validationError(
-    res: Response,
-    errors: any[],
-    message: string = 'Validation failed'
-  ): Response {
-    return this.error(res, message, 422, errors);
-  }
-
-  /**
-   * Send too many requests response (429)
-   */
-  static tooManyRequests(
-    res: Response,
-    message: string = 'Too many requests'
-  ): Response {
-    return this.error(res, message, 429);
-  }
-
-  /**
-   * Send internal server error response (500)
-   */
-  static internalError(
-    res: Response,
-    message: string = 'Internal server error'
-  ): Response {
-    return this.error(res, message, 500);
-  }
-
-  /**
-   * Send service unavailable response (503)
-   */
-  static serviceUnavailable(
-    res: Response,
-    message: string = 'Service unavailable'
-  ): Response {
-    return this.error(res, message, 503);
+  static error(res: Response, statusCode: number, code: string, message: string, details?: unknown): Response {
+    return res
+      .status(statusCode)
+      .type('application/json')
+      .send(JSON.stringify({ success: false, data: null, meta: {}, error: { code, message, details: details ?? null } }, jsonSafe));
   }
 }
 

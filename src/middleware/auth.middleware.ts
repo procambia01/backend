@@ -1,373 +1,103 @@
-import { Request, Response, NextFunction } from 'express';
-import { JwtUtil } from '@/utils/jwt.util';
-import { UnauthorizedError, AccountBannedError, AccountSuspendedError } from '@/utils/error.util';
+import { NextFunction, Request, Response } from 'express';
+import type { PlanTier } from '@prisma/client';
 import { prisma } from '@/config/database';
-import redisClient from '@/config/redis';
+import { effectivePlan } from '@/lib/entitlements';
+import { JwtUtil } from '@/utils/jwt.util';
+import {
+  AccountBannedError,
+  AccountSuspendedError,
+  ForbiddenError,
+  InvalidTokenError,
+  PlanRequiredError,
+  ReauthRequiredError,
+  UnauthorizedError,
+  VerificationRequiredError,
+} from '@/utils/error.util';
+import { bindUserToContext } from './logger.middleware';
 
-// Extend Express Request type to include user
-declare global {
-  namespace Express {
-    interface Request {
-      user?: {
-        userId: string;
-        email: string;
-        role: string;
-      };
-    }
+async function resolve(req: Request): Promise<void> {
+  const token = JwtUtil.extractTokenFromHeader(req.headers.authorization);
+  if (!token) throw new UnauthorizedError('Authentication required');
+  const claims = JwtUtil.verifyAccessToken(token);
+
+  const [session, user] = await Promise.all([
+    prisma.authSession.findUnique({ where: { id: claims.sid } }),
+    prisma.user.findUnique({ where: { id: claims.sub } }),
+  ]);
+
+  // Server-side revocation: logout, password change and "log out everywhere" take effect immediately.
+  if (!session || session.userId !== claims.sub || session.revokedAt) throw new InvalidTokenError();
+  if (!user || user.deletedAt || !user.isActive) throw new UnauthorizedError('Account is not active');
+  if (user.tokenVersion !== claims.tv) throw new InvalidTokenError();
+  if (user.isBanned && (!user.banExpiry || user.banExpiry.getTime() > Date.now())) throw new AccountBannedError(user.banReason ?? undefined);
+  if (user.isSuspended && (!user.suspensionExpiry || user.suspensionExpiry.getTime() > Date.now())) {
+    throw new AccountSuspendedError(user.suspensionReason ?? undefined);
   }
+
+  req.user = {
+    userId: user.id,
+    email: user.email,
+    // Role comes from the database, never from the token, so demotions apply at once.
+    role: user.role,
+    sessionId: session.id,
+    familyId: session.familyId,
+    planTier: effectivePlan(user),
+    emailVerified: user.emailVerified,
+    phoneVerified: user.phoneVerified,
+    idVerified: user.idVerified && user.verificationStatus === 'VERIFIED',
+    reauthUntil: session.reauthUntil,
+    language: user.languagePreference,
+  };
+  bindUserToContext(user.id);
 }
 
 export class AuthMiddleware {
-  /**
-   * Verify JWT token and attach user to request
-   */
-  static async authenticate(req: Request, _res: Response, next: NextFunction): Promise<void> {
-    try {
-      // Extract token from header
-      const authHeader = req.headers.authorization;
-      const token = JwtUtil.extractTokenFromHeader(authHeader);
+  static authenticate = (req: Request, _res: Response, next: NextFunction): void => {
+    resolve(req).then(() => next(), next);
+  };
 
-      if (!token) {
-        throw new UnauthorizedError('No token provided');
-      }
+  /** Attaches req.user when a valid token is present; otherwise continues anonymously. */
+  static optionalAuth = (req: Request, _res: Response, next: NextFunction): void => {
+    if (!req.headers.authorization) return next();
+    resolve(req).then(() => next(), () => next());
+  };
 
-      // Check if token is blacklisted
-      const isBlacklisted = await redisClient.exists(`blacklist:${token}`);
-      if (isBlacklisted) {
-        throw new UnauthorizedError('Token has been revoked');
-      }
+  /** Sensitive actions need a password confirmation within the last 10 minutes. */
+  static requireRecentAuth = (req: Request, _res: Response, next: NextFunction): void => {
+    if (!req.user) return next(new UnauthorizedError());
+    if (!req.user.reauthUntil || req.user.reauthUntil.getTime() <= Date.now()) return next(new ReauthRequiredError());
+    next();
+  };
 
-      // Verify token
-      const decoded = JwtUtil.verifyAccessToken(token);
+  static requireEmailVerified = (req: Request, _res: Response, next: NextFunction): void => {
+    if (!req.user) return next(new UnauthorizedError());
+    if (!req.user.emailVerified) return next(new VerificationRequiredError('Please verify your email address first'));
+    next();
+  };
 
-      // Get user from database
-      const user = await prisma.user.findUnique({
-        where: { id: decoded.userId },
-        select: {
-          id: true,
-          email: true,
-          role: true,
-          isActive: true,
-          isBanned: true,
-          isSuspended: true,
-          banReason: true,
-          suspensionReason: true,
-          deletedAt: true,
-        },
-      });
+  static requirePhoneVerified = (req: Request, _res: Response, next: NextFunction): void => {
+    if (!req.user) return next(new UnauthorizedError());
+    if (!req.user.phoneVerified) return next(new VerificationRequiredError('Please verify your phone number first'));
+    next();
+  };
 
-      if (!user || user.deletedAt) {
-        throw new UnauthorizedError('User not found');
-      }
+  static requireIdVerified = (req: Request, _res: Response, next: NextFunction): void => {
+    if (!req.user) return next(new UnauthorizedError());
+    if (!req.user.idVerified) return next(new VerificationRequiredError('Identity verification is required'));
+    next();
+  };
 
-      if (!user.isActive) {
-        throw new UnauthorizedError('Account is not active');
-      }
+  static requirePlan = (...tiers: PlanTier[]) => (req: Request, _res: Response, next: NextFunction): void => {
+    if (!req.user) return next(new UnauthorizedError());
+    if (!tiers.includes(req.user.planTier)) return next(new PlanRequiredError(`This feature requires: ${tiers.join(' or ')}`));
+    next();
+  };
 
-      if (user.isBanned) {
-        throw new AccountBannedError(user.banReason || undefined);
-      }
-
-      if (user.isSuspended) {
-        throw new AccountSuspendedError();
-      }
-
-      // Attach user to request
-      req.user = {
-        userId: user.id,
-        email: user.email,
-        role: user.role,
-      };
-
-      next();
-    } catch (error) {
-      next(error);
-    }
-  }
-
-  /**
-   * Optional authentication - doesn't fail if no token
-   */
-  static async optionalAuth(req: Request, _res: Response, next: NextFunction): Promise<void> {
-    try {
-      const authHeader = req.headers.authorization;
-      const token = JwtUtil.extractTokenFromHeader(authHeader);
-
-      if (token) {
-        const decoded = JwtUtil.verifyAccessToken(token);
-
-        const user = await prisma.user.findUnique({
-          where: { id: decoded.userId },
-          select: {
-            id: true,
-            email: true,
-            role: true,
-            isActive: true,
-            isBanned: true,
-            isSuspended: true,
-            deletedAt: true,
-          },
-        });
-
-        if (user && !user.deletedAt && user.isActive && !user.isBanned && !user.isSuspended) {
-          req.user = {
-            userId: user.id,
-            email: user.email,
-            role: user.role,
-          };
-        }
-      }
-
-      next();
-    } catch (error) {
-      // Don't throw error, just continue without user
-      next();
-    }
-  }
-
-  /**
-   * Verify email is verified
-   */
-  static async requireEmailVerified(
-    req: Request,
-    _res: Response,
-    next: NextFunction
-  ): Promise<void> {
-    try {
-      if (!req.user) {
-        throw new UnauthorizedError('Authentication required');
-      }
-
-      const user = await prisma.user.findUnique({
-        where: { id: req.user.userId },
-        select: { emailVerified: true },
-      });
-
-      if (!user?.emailVerified) {
-        throw new UnauthorizedError('Please verify your email address');
-      }
-
-      next();
-    } catch (error) {
-      next(error);
-    }
-  }
-
-  /**
-   * Verify phone is verified
-   */
-  static async requirePhoneVerified(
-    req: Request,
-    _res: Response,
-    next: NextFunction
-  ): Promise<void> {
-    try {
-      if (!req.user) {
-        throw new UnauthorizedError('Authentication required');
-      }
-
-      const user = await prisma.user.findUnique({
-        where: { id: req.user.userId },
-        select: { phoneVerified: true },
-      });
-
-      if (!user?.phoneVerified) {
-        throw new UnauthorizedError('Please verify your phone number');
-      }
-
-      next();
-    } catch (error) {
-      next(error);
-    }
-  }
-
-  /**
-   * Verify ID is verified
-   */
-  static async requireIdVerified(req: Request, _res: Response, next: NextFunction): Promise<void> {
-    try {
-      if (!req.user) {
-        throw new UnauthorizedError('Authentication required');
-      }
-
-      const user = await prisma.user.findUnique({
-        where: { id: req.user.userId },
-        select: { idVerified: true, verificationStatus: true },
-      });
-
-      if (!user?.idVerified || user.verificationStatus !== 'VERIFIED') {
-        throw new UnauthorizedError('ID verification required');
-      }
-
-      next();
-    } catch (error) {
-      next(error);
-    }
-  }
-
-  /**
-   * Verify user is premium
-   */
-  static async requirePremium(req: Request, _res: Response, next: NextFunction): Promise<void> {
-    try {
-      if (!req.user) {
-        throw new UnauthorizedError('Authentication required');
-      }
-
-      const user = await prisma.user.findUnique({
-        where: { id: req.user.userId },
-        select: { isPremium: true, premiumExpiry: true },
-      });
-
-      if (!user?.isPremium) {
-        throw new UnauthorizedError('Premium subscription required');
-      }
-
-      // Check if premium expired
-      if (user.premiumExpiry && user.premiumExpiry < new Date()) {
-        throw new UnauthorizedError('Premium subscription has expired');
-      }
-
-      next();
-    } catch (error) {
-      next(error);
-    }
-  }
-
-  /**
-   * Blacklist token (for logout)
-   */
-  static async blacklistToken(token: string, expiresIn: number): Promise<void> {
-    await redisClient.set(`blacklist:${token}`, 'true', expiresIn);
-  }
-
-  /**
-   * Rate limit by user
-   */
-  static async rateLimitByUser(
-    req: Request,
-    res: Response,
-    next: NextFunction,
-    maxRequests: number = 100,
-    windowInSeconds: number = 60
-  ): Promise<void> {
-    try {
-      if (!req.user) {
-        throw new UnauthorizedError('Authentication required');
-      }
-
-      const key = `ratelimit:user:${req.user.userId}`;
-      const requests = await redisClient.increment(key);
-
-      if (requests === 1) {
-        await redisClient.expire(key, windowInSeconds);
-      }
-
-      if (requests > maxRequests) {
-        throw new UnauthorizedError('Rate limit exceeded');
-      }
-
-      // Set rate limit headers
-      res.setHeader('X-RateLimit-Limit', maxRequests);
-      res.setHeader('X-RateLimit-Remaining', Math.max(0, maxRequests - requests));
-      res.setHeader('X-RateLimit-Reset', Date.now() + windowInSeconds * 1000);
-
-      next();
-    } catch (error) {
-      next(error);
-    }
-  }
-
-  /**
-   * Check if user owns resource
-   */
-  static checkOwnership(userIdField: string = 'userId') {
-    return async (req: Request, _res: Response, next: NextFunction): Promise<void> => {
-      try {
-        if (!req.user) {
-          throw new UnauthorizedError('Authentication required');
-        }
-
-        const resourceUserId = req.body[userIdField] || req.params[userIdField];
-
-        if (!resourceUserId) {
-          return next();
-        }
-
-        if (resourceUserId !== req.user.userId) {
-          // Allow admins to bypass
-          if (req.user.role === 'ADMIN' || req.user.role === 'SUPER_ADMIN') {
-            return next();
-          }
-
-          throw new UnauthorizedError('You do not have permission to access this resource');
-        }
-
-        next();
-      } catch (error) {
-        next(error);
-      }
-    };
-  }
-
-  /**
-   * Refresh token middleware
-   */
-  static async refreshToken(req: Request, res: Response, next: NextFunction): Promise<void> {
-    try {
-      const { refreshToken } = req.body;
-
-      if (!refreshToken) {
-        throw new UnauthorizedError('Refresh token required');
-      }
-
-      // Verify refresh token
-      const decoded = JwtUtil.verifyRefreshToken(refreshToken);
-
-      // Get user
-      const user = await prisma.user.findUnique({
-        where: { id: decoded.userId },
-        select: {
-          id: true,
-          email: true,
-          role: true,
-          isActive: true,
-          isBanned: true,
-          isSuspended: true,
-          deletedAt: true,
-        },
-      });
-
-      if (!user || user.deletedAt || !user.isActive || user.isBanned || user.isSuspended) {
-        throw new UnauthorizedError('Invalid refresh token');
-      }
-
-      // Generate new tokens
-      const tokens = JwtUtil.generateTokenPair({
-        userId: user.id,
-        email: user.email,
-        role: user.role,
-      });
-
-      res.json({
-        success: true,
-        message: 'Token refreshed successfully',
-        data: tokens,
-      });
-    } catch (error) {
-      next(error);
-    }
-  }
+  static forbidApiKeyAuth = (req: Request, _res: Response, next: NextFunction): void => {
+    if (req.apiKey) return next(new ForbiddenError('Not available to API keys'));
+    next();
+  };
 }
 
-// Export middleware functions
 export const authenticate = AuthMiddleware.authenticate;
-export const optionalAuth = AuthMiddleware.optionalAuth;
-export const requireEmailVerified = AuthMiddleware.requireEmailVerified;
-export const requirePhoneVerified = AuthMiddleware.requirePhoneVerified;
-export const requireIdVerified = AuthMiddleware.requireIdVerified;
-export const requirePremium = AuthMiddleware.requirePremium;
-export const checkOwnership = AuthMiddleware.checkOwnership;
-export const refreshToken = AuthMiddleware.refreshToken;
-
 export default AuthMiddleware;

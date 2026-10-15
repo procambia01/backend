@@ -1,181 +1,108 @@
-// src/services/exchangeRate.service.ts
-import axios from 'axios';
 import { prisma } from '@/config/database';
-import redisClient from '@/config/redis';
 import { config } from '@/config/env';
+import { RATE_SCALE, rateToScaled, roundDiv, scaledToRate } from '@/lib/money';
+import { BadRequestError, ServiceUnavailableError } from '@/utils/error.util';
 import logger from '@/utils/logger.util';
-import { BadRequestError } from '@/utils/error.util';
+import { currencyService } from './currency.service';
+
+const PIVOT = 'EUR';
+const DEFAULT_URL = 'https://open.er-api.com/v6/latest/EUR';
+/** Reference rates older than this are considered stale for validation purposes. */
+export const MAX_RATE_AGE_MS = 6 * 3600_000;
 
 export class ExchangeRateService {
-  private cacheExpiry = 3600; // 1 hour
+  /** Units of `quote` per 1 `base`, fixed-point 1e10, via the EUR pivot. */
+  async getRateScaled(base: string, quote: string): Promise<{ rateScaled: bigint; asOf: Date }> {
+    base = base.toUpperCase();
+    quote = quote.toUpperCase();
+    if (base === quote) return { rateScaled: RATE_SCALE, asOf: new Date() };
 
-  /**
-   * Get exchange rate between two currencies
-   */
-  async getRate(from: string, to: string): Promise<number> {
-    if (!from || !to) {
-      throw new BadRequestError('Both currencies are required');
-    }
-
-    if (from === to) {
-      return 1; // Same currency
-    }
-
-    const cacheKey = `rate:${from}:${to}`;
-
-    try {
-      // Check cache first
-      const cached = await redisClient.get(cacheKey);
-      if (cached) {
-        logger.debug(`Cache hit for ${from} to ${to}`);
-        return parseFloat(cached as string);
-      }
-
-      // Fetch from external API
-      const rate = await this.fetchRateFromAPI(from, to);
-
-      // Cache result with expiry (EX is in seconds)
-      await redisClient.set(cacheKey, rate.toString(), this.cacheExpiry);
-
-      // Store in database for historical tracking
-      await prisma.exchangeRateSnapshot.create({
-        data: {
-          fromCurrency: from.toUpperCase(),
-          toCurrency: to.toUpperCase(),
-          rate,
-          source: 'API',
-        },
-      });
-
-      logger.info(`Fetched rate: 1 ${from} = ${rate} ${to}`);
-
-      return rate;
-    } catch (error) {
-      logger.error(`Error getting exchange rate for ${from} to ${to}:`, error);
-      
-      // Fallback to database if API fails
-      const lastKnownRate = await this.getLastKnownRate(from, to);
-      if (lastKnownRate) {
-        logger.warn(`Using last known rate for ${from} to ${to}`);
-        return lastKnownRate;
-      }
-
-      throw new Error(`Unable to fetch exchange rate for ${from} to ${to}`);
-    }
+    const [b, q] = await Promise.all([this.pivotRate(base), this.pivotRate(quote)]);
+    // base→quote = (EUR→quote) / (EUR→base)
+    const rateScaled = roundDiv(q.rateScaled * RATE_SCALE, b.rateScaled);
+    return { rateScaled, asOf: b.asOf < q.asOf ? b.asOf : q.asOf };
   }
 
-  /**
-   * Fetch rate from external API
-   */
-  private async fetchRateFromAPI(from: string, to: string): Promise<number> {
-    try {
-      const url = `${config.exchangeRate.apiUrl}/${from.toUpperCase()}`;
-      const response = await axios.get(url, {
-        timeout: 5000,
-        headers: {
-          'Accept': 'application/json',
-        },
-      });
-
-      const rate = response.data.rates?.[to.toUpperCase()];
-      
-      if (!rate) {
-        throw new Error(`Rate not found for ${to}`);
-      }
-
-      return parseFloat(rate);
-    } catch (error) {
-      logger.error('Exchange rate API error:', error);
-      throw error;
-    }
+  async getRate(base: string, quote: string): Promise<{ rate: string; asOf: string }> {
+    const r = await this.getRateScaled(base, quote);
+    return { rate: scaledToRate(r.rateScaled), asOf: r.asOf.toISOString() };
   }
 
-  /**
-   * Get last known rate from database
-   */
-  private async getLastKnownRate(from: string, to: string): Promise<number | null> {
-    const snapshot = await prisma.exchangeRateSnapshot.findFirst({
-      where: {
-        fromCurrency: from.toUpperCase(),
-        toCurrency: to.toUpperCase(),
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
+  private async pivotRate(code: string): Promise<{ rateScaled: bigint; asOf: Date }> {
+    if (code === PIVOT) return { rateScaled: RATE_SCALE, asOf: new Date() };
+    const snap = await prisma.exchangeRateSnapshot.findFirst({
+      where: { baseCurrency: PIVOT, quoteCurrency: code },
+      orderBy: { createdAt: 'desc' },
     });
-
-    return snapshot ? snapshot.rate : null;
+    if (!snap) throw new ServiceUnavailableError(`No reference rate available for ${code}`);
+    return { rateScaled: snap.rateScaled, asOf: snap.createdAt };
   }
 
-  /**
-   * Get multiple rates
-   */
-  async getMultipleRates(from: string, toCurrencies: string[]): Promise<Record<string, number>> {
-    const rates: Record<string, number> = {};
-
-    await Promise.all(
-      toCurrencies.map(async (to) => {
-        rates[to] = await this.getRate(from, to);
-      })
-    );
-
-    return rates;
-  }
-
-  /**
-   * Convert amount between currencies
-   */
-  async convertCurrency(amount: number, from: string, to: string): Promise<number> {
-    const rate = await this.getRate(from, to);
-    return amount * rate;
-  }
-
-  /**
-   * Get historical rates
-   */
-  async getHistoricalRates(from: string, to: string, days: number = 30) {
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - days);
-
-    const snapshots = await prisma.exchangeRateSnapshot.findMany({
-      where: {
-        fromCurrency: from.toUpperCase(),
-        toCurrency: to.toUpperCase(),
-        createdAt: {
-          gte: startDate,
-        },
-      },
-      orderBy: {
-        createdAt: 'asc',
-      },
+  async history(base: string, quote: string, days = 30) {
+    const from = new Date(Date.now() - days * 86_400_000);
+    const rows = await prisma.exchangeRateSnapshot.findMany({
+      where: { baseCurrency: PIVOT, quoteCurrency: { in: [base, quote].filter((c) => c !== PIVOT) }, createdAt: { gte: from } },
+      orderBy: { createdAt: 'asc' },
+      take: 5000,
     });
-
-    return snapshots.map(snapshot => ({
-      date: snapshot.createdAt,
-      rate: snapshot.rate,
-    }));
-  }
-
-  /**
-   * Clear cache for a currency pair
-   */
-  async clearCache(from: string, to: string): Promise<void> {
-    const cacheKey = `rate:${from}:${to}`;
-    await redisClient.delete(cacheKey);
-    logger.info(`Cleared cache for ${from} to ${to}`);
-  }
-
-  /**
-   * Clear all exchange rate caches
-   */
-  async clearAllCaches(): Promise<void> {
-    const pattern = 'rate:*';
-    const keys = await redisClient.keys(pattern);
-    
-    if (keys.length > 0) {
-      // Delete keys one by one
-      await Promise.all(keys.map(key => redisClient.delete(key)));
-      logger.info(`Cleared ${keys.length} exchange rate caches`);
+    // Reduce to one point per day for the requested pair.
+    const byDay = new Map<string, { b?: bigint; q?: bigint }>();
+    for (const r of rows) {
+      const day = r.createdAt.toISOString().slice(0, 10);
+      const e = byDay.get(day) ?? {};
+      if (r.quoteCurrency === base) e.b = r.rateScaled;
+      if (r.quoteCurrency === quote) e.q = r.rateScaled;
+      byDay.set(day, e);
     }
+    const out: { day: string; rate: string }[] = [];
+    for (const [day, e] of byDay) {
+      const b = base === PIVOT ? RATE_SCALE : e.b;
+      const q = quote === PIVOT ? RATE_SCALE : e.q;
+      if (b && q) out.push({ day, rate: scaledToRate(roundDiv(q * RATE_SCALE, b)) });
+    }
+    return out;
+  }
+
+  /** Job: fetch the latest reference rates for every ACTIVE currency and snapshot them. */
+  async refreshRates(): Promise<number> {
+    const url = config.exchangeRate.apiUrl ?? DEFAULT_URL;
+    const headers: Record<string, string> = {};
+    if (config.exchangeRate.apiKey) headers.Authorization = `Bearer ${config.exchangeRate.apiKey}`;
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) throw new Error(`rate provider responded ${res.status}`);
+    const body = (await res.json()) as { rates?: Record<string, number | string>; base?: string; base_code?: string };
+    const rates = body.rates;
+    const base = (body.base ?? body.base_code ?? PIVOT).toUpperCase();
+    if (!rates || base !== PIVOT) throw new Error('unexpected rate provider response');
+
+    const active = await currencyService.listActive();
+    const data: { baseCurrency: string; quoteCurrency: string; rateScaled: bigint; source: string }[] = [];
+    for (const c of active) {
+      if (c.code === PIVOT) continue;
+      const raw = rates[c.code];
+      if (raw === undefined) {
+        logger.warn('no reference rate from provider', { currency: c.code });
+        continue;
+      }
+      try {
+        const scaled = rateToScaled(String(raw));
+        if (scaled > 0n) data.push({ baseCurrency: PIVOT, quoteCurrency: c.code, rateScaled: scaled, source: 'PROVIDER' });
+      } catch {
+        logger.warn('unparseable reference rate', { currency: c.code });
+      }
+    }
+    if (data.length) await prisma.exchangeRateSnapshot.createMany({ data });
+    return data.length;
+  }
+
+  async purgeOld(days = 400) {
+    const r = await prisma.exchangeRateSnapshot.deleteMany({ where: { createdAt: { lt: new Date(Date.now() - days * 86_400_000) } } });
+    return r.count;
+  }
+
+  assertPair(a: string, b: string) {
+    if (a.toUpperCase() === b.toUpperCase()) throw new BadRequestError('Currencies must differ');
   }
 }
+
+export const exchangeRateService = new ExchangeRateService();

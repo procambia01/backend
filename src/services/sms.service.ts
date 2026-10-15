@@ -1,31 +1,23 @@
 import twilio from 'twilio';
 import { config } from '@/config/env';
-import redisClient from '@/config/redis';
+import logger from '@/utils/logger.util';
+import { ServiceUnavailableError } from '@/utils/error.util';
 
+/** Pure transport — OTP generation / hashing / expiry live in PhoneVerificationService. */
 export class SmsService {
-  private client: twilio.Twilio;
+  private client?: twilio.Twilio;
 
-  constructor() {
-    this.client = twilio(config.sms.twilio.accountSid, config.sms.twilio.authToken);
-  }
-
-  async sendVerificationCode(phone: string) {
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    await redisClient.set(`sms:${phone}`, code, 600); // 10 minutes
-    
-    await this.client.messages.create({
-      body: `Your verification code is: ${code}`,
-      from: config.sms.twilio.phoneNumber,
-      to: phone,
-    });
-  }
-
-  async verifyCode(phone: string, code: string): Promise<boolean> {
-    const storedCode = await redisClient.get<string>(`sms:${phone}`);
-    if (storedCode === code) {
-      await redisClient.delete(`sms:${phone}`);
-      return true;
+  async send(to: string, body: string): Promise<void> {
+    if (config.sms.driver === 'console') {
+      // Only reachable outside production (enforced by the env schema).
+      logger.info('sms (console driver)', { to: to.slice(0, 4) + '***' });
+      return;
     }
-    return false;
+    const { accountSid, authToken, phoneNumber } = config.sms.twilio;
+    if (!accountSid || !authToken || !phoneNumber) throw new ServiceUnavailableError('SMS delivery is not configured');
+    this.client ??= twilio(accountSid, authToken);
+    await this.client.messages.create({ body, from: phoneNumber, to });
   }
 }
+
+export const smsService = new SmsService();

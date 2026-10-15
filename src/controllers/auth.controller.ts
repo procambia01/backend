@@ -1,153 +1,58 @@
 import { Request, Response } from 'express';
-import { AuthService } from '@/services/auth.service';
+import { authService } from '@/services/auth.service';
+import { sessionService } from '@/services/session.service';
 import ResponseUtil from '@/utils/response.util';
-// import { AuthMiddleware } from '@/middleware/auth.middleware';
+import { sessionMeta, uid } from '@/lib/http';
 
 export class AuthController {
-  private authService: AuthService;
+  register = async (req: Request, res: Response) => ResponseUtil.created(res, await authService.register(req.body, sessionMeta(req)));
+  login = async (req: Request, res: Response) => ResponseUtil.success(res, await authService.login(req.body, sessionMeta(req)));
+  refresh = async (req: Request, res: Response) => ResponseUtil.success(res, await authService.refresh(req.body.refreshToken, sessionMeta(req)));
 
-  constructor() {
-    this.authService = new AuthService();
-  }
-
-  /**
-   * Register a new user
-   */
-  register = async (req: Request, res: Response): Promise<Response> => {
-    const userData = req.body;
-    const result = await this.authService.register(userData);
-    return ResponseUtil.created(res, result, 'Registration successful');
+  logout = async (req: Request, res: Response) => {
+    await authService.logout(req.user!.sessionId, uid(req));
+    return ResponseUtil.success(res, { loggedOut: true });
+  };
+  logoutAll = async (req: Request, res: Response) => {
+    await authService.logoutAll(uid(req));
+    return ResponseUtil.success(res, { loggedOut: true });
   };
 
-  /**
-   * Login user
-   */
-  login = async (req: Request, res: Response): Promise<Response> => {
-    const { email, password, rememberMe } = req.body;
-    const result = await this.authService.login(email, password, rememberMe);
-    return ResponseUtil.success(res, result, 'Login successful');
+  me = async (req: Request, res: Response) => ResponseUtil.success(res, await authService.me(uid(req)));
+
+  reauthenticate = async (req: Request, res: Response) =>
+    ResponseUtil.success(res, await authService.reauthenticate(uid(req), req.user!.sessionId, req.body.password, req.body.twoFactorCode));
+
+  verifyEmail = async (req: Request, res: Response) => {
+    await authService.verifyEmail(req.body.token);
+    return ResponseUtil.success(res, { verified: true });
+  };
+  resendVerification = async (req: Request, res: Response) => {
+    await authService.resendVerification(uid(req));
+    return ResponseUtil.success(res, { sent: true });
+  };
+  forgotPassword = async (req: Request, res: Response) => {
+    await authService.forgotPassword(req.body.email);
+    return ResponseUtil.success(res, { sent: true });
+  };
+  resetPassword = async (req: Request, res: Response) => {
+    await authService.resetPassword(req.body.token, req.body.password);
+    return ResponseUtil.success(res, { reset: true });
+  };
+  changePassword = async (req: Request, res: Response) =>
+    ResponseUtil.success(res, { tokens: await authService.changePassword(uid(req), req.user!.sessionId, req.body.currentPassword, req.body.newPassword) });
+
+  sessions = async (req: Request, res: Response) => ResponseUtil.success(res, await sessionService.list(uid(req), req.user!.sessionId));
+  revokeSession = async (req: Request, res: Response) => {
+    await sessionService.revokeOne(uid(req), req.params.id);
+    return ResponseUtil.success(res, { revoked: true });
   };
 
-  /**
-   * Logout user
-   */
-  logout = async (req: Request, res: Response): Promise<Response> => {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (token) {
-      await this.authService.logout(token);
-    }
-    return ResponseUtil.success(res, null, 'Logout successful');
-  };
-
-  /**
-   * Forgot password
-   */
-  forgotPassword = async (req: Request, res: Response): Promise<Response> => {
-    const { email } = req.body;
-    await this.authService.forgotPassword(email);
-    return ResponseUtil.success(res, null, 'Password reset email sent');
-  };
-
-  /**
-   * Reset password
-   */
-  resetPassword = async (req: Request, res: Response): Promise<Response> => {
-    const { token, password } = req.body;
-    await this.authService.resetPassword(token, password);
-    return ResponseUtil.success(res, null, 'Password reset successful');
-  };
-
-  /**
-   * Verify email
-   */
-  verifyEmail = async (req: Request, res: Response): Promise<Response> => {
-    const { token } = req.body;
-    await this.authService.verifyEmail(token);
-    return ResponseUtil.success(res, null, 'Email verified successfully');
-  };
-
-  /**
-   * Resend verification email
-   */
-  resendVerification = async (req: Request, res: Response): Promise<Response> => {
-    const { email } = req.body;
-    await this.authService.resendVerificationEmail(email);
-    return ResponseUtil.success(res, null, 'Verification email sent');
-  };
-
-  /**
-   * Get current user
-   */
-  getCurrentUser = async (req: Request, res: Response): Promise<Response> => {
-    const userId = req.user!.userId;
-    const user = await this.authService.getCurrentUser(userId);
-    return ResponseUtil.success(res, user);
-  };
-
-  /**
-   * Change password
-   */
-  changePassword = async (req: Request, res: Response): Promise<Response> => {
-    const userId = req.user!.userId;
-    const { currentPassword, newPassword } = req.body;
-    await this.authService.changePassword(userId, currentPassword, newPassword);
-    return ResponseUtil.success(res, null, 'Password changed successfully');
-  };
-
-  /**
-   * Enable two-factor authentication
-   */
-  enableTwoFactor = async (req: Request, res: Response): Promise<Response> => {
-    const userId = req.user!.userId;
-    const result = await this.authService.enableTwoFactor(userId);
-    return ResponseUtil.success(res, result, 'Two-factor authentication enabled');
-  };
-
-  /**
-   * Disable two-factor authentication
-   */
-  disableTwoFactor = async (req: Request, res: Response): Promise<Response> => {
-    const userId = req.user!.userId;
-    await this.authService.disableTwoFactor(userId);
-    return ResponseUtil.success(res, null, 'Two-factor authentication disabled');
-  };
-
-  /**
-   * Verify two-factor code
-   */
-  verifyTwoFactor = async (req: Request, res: Response): Promise<Response> => {
-    const userId = req.user!.userId;
-    const { code } = req.body;
-    await this.authService.verifyTwoFactor(userId, code);
-    return ResponseUtil.success(res, null, 'Two-factor code verified');
-  };
-
-  /**
-   * Get all active sessions
-   */
-  getSessions = async (req: Request, res: Response): Promise<Response> => {
-    const userId = req.user!.userId;
-    const sessions = await this.authService.getSessions(userId);
-    return ResponseUtil.success(res, sessions);
-  };
-
-  /**
-   * Revoke a session
-   */
-  revokeSession = async (req: Request, res: Response): Promise<Response> => {
-    const userId = req.user!.userId;
-    const { sessionId } = req.params;
-    await this.authService.revokeSession(userId, sessionId);
-    return ResponseUtil.success(res, null, 'Session revoked');
-  };
-
-  /**
-   * Revoke all sessions except current
-   */
-  revokeAllSessions = async (req: Request, res: Response): Promise<Response> => {
-    const userId = req.user!.userId;
-    const currentToken = req.headers.authorization?.split(' ')[1];
-    await this.authService.revokeAllSessions(userId, currentToken);
-    return ResponseUtil.success(res, null, 'All sessions revoked');
+  twoFactorSetup = async (req: Request, res: Response) => ResponseUtil.success(res, await authService.beginTwoFactorSetup(uid(req)));
+  twoFactorEnable = async (req: Request, res: Response) => ResponseUtil.success(res, await authService.enableTwoFactor(uid(req), req.body.code));
+  twoFactorDisable = async (req: Request, res: Response) => {
+    await authService.disableTwoFactor(uid(req), req.body.password, req.body.code);
+    return ResponseUtil.success(res, { disabled: true });
   };
 }
+export const authController = new AuthController();

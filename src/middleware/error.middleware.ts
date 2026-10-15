@@ -1,222 +1,82 @@
 import { Request, Response, NextFunction } from 'express';
-import { AppError } from '@/utils/error.util';
-import logger from '@/utils/logger.util';
-import { config } from '@/config/env';
 import { Prisma } from '@prisma/client';
 import { ZodError } from 'zod';
+import { AppError } from '@/utils/error.util';
+import ResponseUtil from '@/utils/response.util';
+import logger from '@/utils/logger.util';
+import { config } from '@/config/env';
+
+function prismaToApi(error: Prisma.PrismaClientKnownRequestError): { status: number; code: string; message: string } {
+  switch (error.code) {
+    case 'P2002':
+      return { status: 409, code: 'CONFLICT', message: 'This record already exists' };
+    case 'P2025':
+      return { status: 404, code: 'NOT_FOUND', message: 'Record not found' };
+    case 'P2023':
+      return { status: 400, code: 'BAD_REQUEST', message: 'Invalid identifier' };
+    default:
+      return { status: 500, code: 'INTERNAL_ERROR', message: 'Database error' };
+  }
+}
 
 export class ErrorMiddleware {
-  /**
-   * Global error handler
-   * FIX: was using `this.handlePrismaError` and `this.handleMulterError` inside
-   * a static method — `this` is undefined when the function is exported as a
-   * standalone reference (errorHandler = ErrorMiddleware.handle). Changed all
-   * internal calls to use the class name directly: ErrorMiddleware.handlePrismaError
-   */
-  static handle(error: Error | AppError, req: Request, res: Response, next: NextFunction): void {
-    // Log error
-    logger.error('Error occurred:', {
-      message: error.message,
-      stack: error.stack,
-      path: req.path,
-      method: req.method,
-      ip: req.ip,
-      userId: req.user?.userId,
-    });
+  static handle(error: Error, req: Request, res: Response, _next: NextFunction): void {
+    const send = (status: number, code: string, message: string, details?: unknown) => {
+      res.locals.errorCode = code;
+      ResponseUtil.error(res, status, code, message, details);
+    };
 
-    // Handle AppError
     if (error instanceof AppError) {
-      res.status(error.statusCode).json({
-        success: false,
-        message: error.message,
-        errors: error.errors,
-        ...(config.isDevelopment && { stack: error.stack }),
-        timestamp: new Date().toISOString(),
-      });
-      return;
+      if (error.statusCode >= 500) logger.error('app error', { code: error.code, message: error.message, stack: error.stack });
+      return send(error.statusCode, error.code, error.message, error.details);
     }
-
-    // Handle Prisma known errors (e.g. unique constraint, not found)
-    if (error instanceof Prisma.PrismaClientKnownRequestError) {
-      const prismaError = ErrorMiddleware.handlePrismaError(error);
-      res.status(prismaError.statusCode).json({
-        success: false,
-        message: prismaError.message,
-        ...(config.isDevelopment && { stack: error.stack }),
-        timestamp: new Date().toISOString(),
-      });
-      return;
-    }
-
-    // Handle Prisma validation errors (malformed ObjectID, bad query shape etc.)
-    if (error instanceof Prisma.PrismaClientValidationError) {
-      res.status(400).json({
-        success: false,
-        message: 'Invalid data provided',
-        ...(config.isDevelopment && { details: error.message, stack: error.stack }),
-        timestamp: new Date().toISOString(),
-      });
-      return;
-    }
-
-    // Handle raw Prisma engine errors (e.g. malformed ObjectID from inconsistent column data)
-    if (
-      error.constructor?.name === 'PrismaClientUnknownRequestError' ||
-      error.message?.includes('Malformed ObjectID') ||
-      error.message?.includes('Inconsistent column data')
-    ) {
-      res.status(400).json({
-        success: false,
-        message: 'Invalid ID format',
-        timestamp: new Date().toISOString(),
-      });
-      return;
-    }
-
-    // Handle Zod validation errors
     if (error instanceof ZodError) {
-      const errors = error.errors.map((err) => ({
-        field: err.path.join('.'),
-        message: err.message,
-      }));
-
-      res.status(422).json({
-        success: false,
-        message: 'Validation failed',
-        errors,
-        ...(config.isDevelopment && { stack: error.stack }),
-        timestamp: new Date().toISOString(),
-      });
-      return;
+      return send(
+        422,
+        'VALIDATION_ERROR',
+        'Validation failed',
+        error.errors.map((e) => ({ field: e.path.join('.'), message: e.message }))
+      );
     }
-
-    // Handle JWT errors
-    if (error.name === 'JsonWebTokenError') {
-      res.status(401).json({
-        success: false,
-        message: 'Invalid token',
-        timestamp: new Date().toISOString(),
-      });
-      return;
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      const mapped = prismaToApi(error);
+      if (mapped.status >= 500) logger.error('prisma error', { code: error.code, message: error.message });
+      return send(mapped.status, mapped.code, mapped.message);
     }
-
-    if (error.name === 'TokenExpiredError') {
-      res.status(401).json({
-        success: false,
-        message: 'Token expired',
-        timestamp: new Date().toISOString(),
-      });
-      return;
+    if (error instanceof Prisma.PrismaClientValidationError) {
+      logger.warn('prisma validation error', { message: error.message.slice(0, 300) });
+      return send(400, 'BAD_REQUEST', 'Invalid data provided');
     }
-
-    // Handle Multer errors
+    if (error.message?.includes('Malformed ObjectID') || error.message?.includes('Inconsistent column data')) {
+      return send(400, 'BAD_REQUEST', 'Invalid identifier');
+    }
     if (error.name === 'MulterError') {
-      const multerError = ErrorMiddleware.handleMulterError(error);
-      res.status(multerError.statusCode).json({
-        success: false,
-        message: multerError.message,
-        timestamp: new Date().toISOString(),
-      });
-      return;
+      return send(400, 'UPLOAD_INVALID', error.message);
+    }
+    if ((error as { type?: string }).type === 'entity.too.large') {
+      return send(413, 'BAD_REQUEST', 'Request body too large');
+    }
+    if ((error as { type?: string }).type === 'entity.parse.failed') {
+      return send(400, 'BAD_REQUEST', 'Malformed JSON body');
     }
 
-    // Generic fallback
-    const statusCode = 500;
-    const message = config.isProduction
-      ? 'Internal server error'
-      : error.message || 'Something went wrong';
-
-    res.status(statusCode).json({
-      success: false,
-      message,
-      ...(config.isDevelopment && { stack: error.stack }),
-      timestamp: new Date().toISOString(),
-    });
-  }
-
-  private static handlePrismaError(error: Prisma.PrismaClientKnownRequestError): {
-    statusCode: number;
-    message: string;
-  } {
-    switch (error.code) {
-      case 'P2002': {
-        // MongoDB Prisma returns meta.target as a string (e.g. "User_phone_key")
-        // PostgreSQL returns it as an array (e.g. ["email"]). Handle both.
-        const raw = error.meta?.target;
-        let field = 'field';
-        if (Array.isArray(raw)) {
-          field = raw.join(', ');
-        } else if (typeof raw === 'string') {
-          // Extract field from constraint name: "User_phone_key" → "phone"
-          // Pattern: ModelName_fieldName_key
-          const match = raw.match(/^[A-Z][a-zA-Z]+_(.+?)_key$/);
-          field = match ? match[1] : raw;
-        }
-        // Map internal field names to user-friendly labels
-        const labels: Record<string, string> = {
-          email: 'Email address',
-          phone: 'Phone number',
-          name: 'Name',
-        };
-        const label = labels[field] ?? field;
-        return { statusCode: 409, message: `${label} is already in use` };
-      }
-      case 'P2025':
-        return { statusCode: 404, message: 'Record not found' };
-      case 'P2003':
-        return { statusCode: 400, message: 'Invalid reference to related record' };
-      case 'P2011':
-        return { statusCode: 400, message: 'Required field cannot be null' };
-      case 'P2014':
-        return { statusCode: 400, message: 'Invalid relation' };
-      case 'P2016':
-        return { statusCode: 400, message: 'Invalid query parameters' };
-      case 'P2021':
-        return { statusCode: 500, message: 'Database table does not exist' };
-      case 'P2022':
-        return { statusCode: 500, message: 'Database column does not exist' };
-      default:
-        return {
-          statusCode: 500,
-          message: config.isProduction ? 'Database error' : error.message,
-        };
-    }
-  }
-
-  private static handleMulterError(error: any): {
-    statusCode: number;
-    message: string;
-  } {
-    switch (error.code) {
-      case 'LIMIT_FILE_SIZE':
-        return { statusCode: 400, message: 'File size too large' };
-      case 'LIMIT_FILE_COUNT':
-        return { statusCode: 400, message: 'Too many files' };
-      case 'LIMIT_UNEXPECTED_FILE':
-        return { statusCode: 400, message: 'Unexpected file field' };
-      default:
-        return { statusCode: 400, message: 'File upload error' };
-    }
+    logger.error('unhandled error', { message: error.message, stack: config.isProduction ? undefined : error.stack, path: req.path });
+    return send(500, 'INTERNAL_ERROR', config.isProduction ? 'Internal server error' : error.message);
   }
 
   static notFound(req: Request, res: Response, _next: NextFunction): void {
-    res.status(404).json({
-      success: false,
-      message: `Route ${req.method} ${req.path} not found`,
-      timestamp: new Date().toISOString(),
-    });
+    res.locals.errorCode = 'NOT_FOUND';
+    ResponseUtil.error(res, 404, 'NOT_FOUND', `Route ${req.method} ${req.path} not found`);
   }
 
-  static asyncHandler(fn: Function) {
-    return (req: Request, res: Response, next: NextFunction): void => {
+  static asyncHandler<T extends Request = Request>(fn: (req: T, res: Response, next: NextFunction) => unknown) {
+    return (req: T, res: Response, next: NextFunction): void => {
       Promise.resolve(fn(req, res, next)).catch(next);
     };
   }
 }
 
-// Bound exports so `this` context is preserved when used as Express middleware
-export const errorHandler = ErrorMiddleware.handle.bind(ErrorMiddleware);
-export const notFound = ErrorMiddleware.notFound.bind(ErrorMiddleware);
-export const asyncHandler = ErrorMiddleware.asyncHandler.bind(ErrorMiddleware);
-
+export const errorHandler = ErrorMiddleware.handle;
+export const notFound = ErrorMiddleware.notFound;
+export const asyncHandler = ErrorMiddleware.asyncHandler;
 export default ErrorMiddleware;

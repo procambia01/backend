@@ -1,12 +1,22 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// CashMouver — Prisma schema (MongoDB)
+//
+// Design rules (see docs/ARCHITECTURE.md):
+//  * CashMouver NEVER custodies the currency users exchange. There is no
+//    wallet, escrow, deposit, withdrawal or refund of exchanged cash anywhere
+//    in this schema.
+//  * The MongoDB connector has no Decimal type. All money is stored as
+//    integers in minor units (BigInt for exchange amounts, Int for service
+//    prices) and exchange rates are fixed-point BigInt scaled by 1e10
+//    (see src/lib/money.ts). No Float is used for money or rates.
+//  * `Payment` = money paid TO CashMouver for a service.
+//    `Swap`/`SwapEvent` = marketplace activity between two users.
+//    `LedgerEntry` = immutable record of CashMouver's own revenue.
+//  * Optional fields are never marked @unique: MongoDB indexes a missing
+//    field as null, so a second document without the field would collide.
 
 generator client {
-  provider        = "prisma-client-js"
-  binaryTargets   = ["native", "windows"]
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "windows"]
 }
 
 datasource db {
@@ -14,8 +24,15 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// Geospatial point (GeoJSON). A 2dsphere index is created at startup by
+// src/lib/geo-indexes.ts because Prisma cannot declare one.
+type GeoPoint {
+  type        String  @default("Point")
+  coordinates Float[] // [longitude, latitude]
+}
+
 // ============================================
-// BETTER AUTH MODELS (Required for better-auth)
+// USERS & AUTH
 // ============================================
 
 model User {
@@ -27,118 +44,113 @@ model User {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  // Auth
-  passwordHash String?
-
-  // Better Auth fields
-  twoFactorEnabled Boolean @default(false)
+  // Credentials. tokenVersion is bumped on password change / "log out
+  // everywhere" so every previously issued access token stops working.
+  passwordHash      String?
+  tokenVersion      Int       @default(0)
+  passwordChangedAt DateTime?
+  twoFactorEnabled  Boolean   @default(false)
 
   // Profile
-  phone         String?
-  phoneVerified Boolean @default(false)
-  bio           String?
+  phone           String? // E.164
+  phoneVerified   Boolean   @default(false)
+  phoneVerifiedAt DateTime?
+  bio             String?
 
-  // Role & Permissions
+  // Role & permissions
   role        UserRole @default(USER)
   permissions String[] @default([])
 
-  // Verification & Trust
-  idVerified         Boolean            @default(false)
-  idDocumentUrl      String?
-  selfieUrl          String?
-  verificationStatus VerificationStatus @default(UNVERIFIED)
+  // Verification (summary only — the source of truth is VerificationCase,
+  // and these fields are written exclusively by VerificationService).
+  verificationStatus    VerificationStatus @default(UNVERIFIED)
+  verificationTier      VerificationTier   @default(NONE)
+  idVerified            Boolean            @default(false)
+  verifiedAt            DateTime?
+  verificationExpiresAt DateTime?
+  businessVerified      Boolean            @default(false)
 
-  // Trust Metrics
+  // Trust metrics (derived counters; not money)
   rating           Float @default(0)
   totalSwaps       Int   @default(0)
   successfulSwaps  Int   @default(0)
-  failedSwaps      Int   @default(0)
+  cancelledSwaps   Int   @default(0)
+  disputedSwaps    Int   @default(0)
   confirmationRate Float @default(0)
+  responseRate     Float @default(0)
   trustScore       Int   @default(0)
 
-  // Location
+  // Location. `privateLocation` is exact and NEVER leaves the server;
+  // `areaCenter` is a coarse public trading area used for discovery.
   country            String?
   city               String?
   state              String?
-  latitude           Float?
-  longitude          Float?
+  privateLocation    GeoPoint?
+  areaCenter         GeoPoint?
   lastLocationUpdate DateTime?
 
-  // Account Status
-  isActive  Boolean   @default(true)
-  isBanned  Boolean   @default(false)
-  banReason String?
-  bannedAt  DateTime?
-  bannedBy  String?   @db.ObjectId
-  banExpiry DateTime?
+  // Account status
+  isActive          Boolean   @default(true)
+  isBanned          Boolean   @default(false)
+  banReason         String?
+  bannedAt          DateTime?
+  bannedBy          String?   @db.ObjectId
+  banExpiry         DateTime?
+  isSuspended       Boolean   @default(false)
+  suspensionReason  String?
+  suspendedAt       DateTime?
+  suspendedBy       String?   @db.ObjectId
+  suspensionExpiry  DateTime?
+  tradingRestricted Boolean   @default(false) // set by risk actions
+  deletedAt         DateTime?
 
-  // Suspension (less severe than ban) ✅ ADDED
-  isSuspended      Boolean   @default(false)
-  suspensionReason String?
-  suspendedAt      DateTime?
-  suspendedBy      String?   @db.ObjectId
-  suspensionExpiry DateTime?
+  // Plan entitlements (denormalised from Subscription, written only by the
+  // verified Stripe webhook). Entitlement checks also compare planExpiresAt
+  // with "now", so an expired plan is rejected even if no job has run.
+  planTier      PlanTier  @default(FREE)
+  planExpiresAt DateTime?
 
-  // Soft Delete ✅ ADDED
-  deletedAt DateTime?
-
-  // Premium Features (for monetization)
-  isPremium           Boolean      @default(false)
-  premiumTier         PremiumTier?
-  premiumExpiry       DateTime?
-  verificationFeePaid Boolean      @default(false)
-  stripeCustomerId    String?      @unique
-  isBusinessPartner   Boolean      @default(false)
-
-  // Preferences
+  // Preferences / i18n
   preferredCurrencies     String[] @default([])
   preferredMeetingPlaces  String[] @default([])
-  maxSwapAmount           Float    @default(0)
   notificationPreferences Json?
   languagePreference      String   @default("en")
-
-  // App Settings
-  darkMode      Boolean @default(false)
-  receiveEmails Boolean @default(true)
-  receiveSMS    Boolean @default(true)
-  receivePush   Boolean @default(true)
+  timezone                String   @default("UTC")
+  darkMode                Boolean  @default(false)
+  receiveEmails           Boolean  @default(true)
+  receiveSMS              Boolean  @default(true)
+  receivePush             Boolean  @default(true)
 
   // Relations
-  accounts     Account[]
-  sessions     Session[]
-  verification Verification[]
-
-  offersCreated     SwapOffer[]       @relation("OfferCreator")
-  swapsAsInitiator  Swap[]            @relation("SwapInitiator")
-  swapsAsReceiver   Swap[]            @relation("SwapReceiver")
+  sessions          AuthSession[]
+  offersCreated     SwapOffer[]        @relation("OfferCreator")
+  swapsAsInitiator  Swap[]             @relation("SwapInitiator")
+  swapsAsReceiver   Swap[]             @relation("SwapReceiver")
   messages          Message[]
-  ratingsGiven      Rating[]          @relation("RatingGiver")
-  ratingsReceived   Rating[]          @relation("RatingReceiver")
-  disputes          Dispute[]
-  disputesResolved  Dispute[]         @relation("DisputeResolver")
+  ratingsGiven      Rating[]           @relation("RatingGiver")
+  ratingsReceived   Rating[]           @relation("RatingReceiver")
+  disputesReported  Dispute[]          @relation("DisputeReporter")
+  disputesAgainst   Dispute[]          @relation("DisputeAgainst")
+  disputesResolved  Dispute[]          @relation("DisputeResolver")
   notifications     Notification[]
-  transactions      Transaction[]
-  savedLocations    SavedLocation[]   @relation("SavedLocations")
-  blockedUsers      BlockedUser[]     @relation("BlockedBy")
-  blockedBy         BlockedUser[]     @relation("Blocking")
-  referralsMade     Referral[]        @relation("ReferralsMade")
-  referralsReceived Referral[]        @relation("ReferralsReceived")
-  favorites         FavoriteUser[]    @relation("Favorites")
-  favoritedBy       FavoriteUser[]    @relation("FavoritedBy")
-  securityDeposits  SecurityDeposit[] @relation("SecurityDeposits")
-  pushTokens        PushToken[]       @relation("PushTokens")
-  activities        ActivityLog[]     @relation("Activities")
-  adminLogs         AdminLog[]
+  payments          Payment[]
   subscriptions     Subscription[]
+  savedLocations    SavedLocation[]
+  blockedUsers      BlockedUser[]      @relation("BlockedBy")
+  blockedBy         BlockedUser[]      @relation("Blocking")
+  favorites         FavoriteUser[]     @relation("Favorites")
+  favoritedBy       FavoriteUser[]     @relation("FavoritedBy")
+  pushTokens        PushToken[]
+  activities        ActivityLog[]
   apiKeys           ApiKey[]
-}
+  verificationCases VerificationCase[] @relation("CaseOwner")
+  referralsMade     Referral[]         @relation("ReferralsMade")
+  referralReceived  Referral[]         @relation("ReferralsReceived")
 
-// ✅ ADDED - Add this enum
-enum VerificationStatus {
-  UNVERIFIED
-  PENDING
-  VERIFIED
-  REJECTED
+  @@index([role])
+  @@index([planTier, planExpiresAt])
+  @@index([verificationStatus])
+  @@index([createdAt])
 }
 
 enum UserRole {
@@ -148,57 +160,158 @@ enum UserRole {
   SUPER_ADMIN
 }
 
-enum PremiumTier {
-  BASIC
+enum PlanTier {
+  FREE
   PREMIUM
   BUSINESS
 }
 
-model Account {
-  id                String  @id @default(auto()) @map("_id") @db.ObjectId
-  userId            String  @db.ObjectId
-  type              String
-  provider          String
-  providerAccountId String
-  refresh_token     String?
-  access_token      String?
-  expires_at        Int?
-  token_type        String?
-  scope             String?
-  id_token          String?
-  session_state     String?
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([provider, providerAccountId])
+enum VerificationStatus {
+  UNVERIFIED
+  PENDING
+  VERIFIED
+  REJECTED
+  EXPIRED
 }
 
-model Session {
-  id           String   @id @default(auto()) @map("_id") @db.ObjectId
-  sessionToken String   @unique
-  userId       String   @db.ObjectId
-  expires      DateTime
-  ipAddress    String?
-  userAgent    String?
-  createdAt    DateTime @default(now())
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+enum VerificationTier {
+  NONE
+  BASIC
+  ENHANCED
 }
 
-model Verification {
+/// Refresh-token backed login session (rotation + reuse detection).
+model AuthSession {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  userId String @db.ObjectId
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // All rotated tokens of one login share a familyId. Presenting an
+  // already-rotated refresh token revokes the whole family.
+  familyId         String
+  refreshTokenHash String    @unique
+  deviceId         String?
+  deviceName       String?
+  ipAddress        String?
+  userAgent        String?
+  reauthUntil      DateTime?
+
+  createdAt     DateTime  @default(now())
+  lastUsedAt    DateTime  @default(now())
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  revokedReason String?
+  rotatedAt     DateTime?
+
+  @@index([userId, revokedAt])
+  @@index([familyId])
+  @@index([expiresAt])
+}
+
+/// Devices seen for an account — drives new-device login alerts and the
+/// multi-account / referral-abuse risk checks. Only salted hashes are kept.
+model LoginDevice {
   id         String   @id @default(auto()) @map("_id") @db.ObjectId
-  identifier String
-  token      String   @unique
-  expires    DateTime
-  userId     String?  @db.ObjectId
+  userId     String   @db.ObjectId
+  deviceHash String
+  label      String?
+  firstSeen  DateTime @default(now())
+  lastSeen   DateTime @default(now())
 
-  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([userId, deviceHash])
+  @@index([deviceHash])
+}
 
-  @@unique([identifier, token])
+/// Single-use email / password-reset tokens (stored hashed).
+model EmailToken {
+  id        String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String    @db.ObjectId
+  purpose   String // EMAIL_VERIFY | PASSWORD_RESET
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, purpose])
+  @@index([expiresAt])
+}
+
+/// Phone verification one-time passcodes (hashed, expiring, attempt-limited).
+model OtpChallenge {
+  id                String     @id @default(auto()) @map("_id") @db.ObjectId
+  userId            String     @db.ObjectId
+  purpose           OtpPurpose
+  phone             String
+  codeHash          String
+  attempts          Int        @default(0)
+  maxAttempts       Int        @default(5)
+  resendAvailableAt DateTime
+  expiresAt         DateTime
+  consumedAt        DateTime?
+  createdAt         DateTime   @default(now())
+
+  @@index([userId, purpose, createdAt])
+  @@index([expiresAt])
+}
+
+enum OtpPurpose {
+  PHONE_VERIFY
+}
+
+/// One verified phone number belongs to exactly one account.
+model VerifiedPhone {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  phone      String   @unique
+  userId     String   @unique @db.ObjectId
+  verifiedAt DateTime @default(now())
+}
+
+model TwoFactorSecret {
+  id               String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId           String    @unique @db.ObjectId
+  secretEnc        String // AES-256-GCM encrypted base32 secret
+  backupCodeHashes String[]  @default([])
+  confirmedAt      DateTime?
+  createdAt        DateTime  @default(now())
 }
 
 // ============================================
-// SWAP OFFERS & MATCHING
+// CURRENCIES
+// ============================================
+
+model Currency {
+  id        String  @id @default(auto()) @map("_id") @db.ObjectId
+  code      String  @unique // ISO 4217
+  name      String
+  symbol    String
+  minorUnit Int     @default(2)
+  region    String // EUROPE | NORTH_AMERICA | SOUTH_AMERICA | ASIA | OCEANIA | AFRICA | MIDDLE_EAST
+  isActive  Boolean @default(true)
+  isPopular Boolean @default(false)
+  sortOrder Int     @default(1000)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
+  @@index([region])
+}
+
+/// Fixed-point (1e10) reference rates. `rateScaled` = units of `quote` per
+/// 1 unit of `base`.
+model ExchangeRateSnapshot {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  baseCurrency  String
+  quoteCurrency String
+  rateScaled    BigInt
+  source        String   @default("ECB")
+  createdAt     DateTime @default(now())
+
+  @@index([baseCurrency, quoteCurrency, createdAt])
+}
+
+// ============================================
+// OFFERS (marketplace inventory)
 // ============================================
 
 model SwapOffer {
@@ -206,21 +319,30 @@ model SwapOffer {
   userId String @db.ObjectId
   user   User   @relation("OfferCreator", fields: [userId], references: [id], onDelete: Cascade)
 
-  // Currencies
-  haveCurrency String
-  wantCurrency String
-  haveAmount   Float // Changed from Decimal to Float
-  wantAmount   Float // Changed from Decimal to Float
-  exchangeRate Float // Changed from Decimal to Float
+  // Currencies — "have" is what the owner will hand over, "want" what they
+  // want to receive. Amounts are minor units of the respective currency.
+  haveCurrency   String
+  wantCurrency   String
+  haveTotalMinor BigInt // original amount offered
+  rateScaled     BigInt // want per 1 have, scaled 1e10
+  minSwapMinor   BigInt @default(0) // smallest slice a taker may reserve (have currency)
 
-  // Location
-  country     String
-  city        String
-  state       String?
-  latitude    Float
-  longitude   Float
-  meetingArea String?
-  radius      Int     @default(5) // km
+  // Inventory reservation (NOT custody — just stops one offer being sold
+  // twice). Invariant: remaining + reserved + consumed == haveTotalMinor.
+  remainingMinor BigInt
+  reservedMinor  BigInt @default(0)
+  consumedMinor  BigInt @default(0)
+
+  // Location. `privateLocation` is exact and never serialised; `area` is the
+  // coarse public trading area (snapped + deterministically jittered).
+  country         String
+  city            String
+  state           String?
+  area            GeoPoint
+  areaLabel       String?
+  privateLocation GeoPoint?
+  radiusKm        Int       @default(5)
+  meetingArea     String?
 
   // Availability
   availableFrom  DateTime
@@ -232,40 +354,46 @@ model SwapOffer {
   status     OfferStatus     @default(ACTIVE)
   visibility OfferVisibility @default(PUBLIC)
 
-  // Additional Info
+  // Additional info
   notes                  String?
   preferredMeetingPlaces String[] @default([])
   requiresVerifiedUsers  Boolean  @default(false)
   minTrustScore          Int      @default(0)
 
-  // Metadata
+  // Metrics
   viewCount  Int @default(0)
   matchCount Int @default(0)
 
-  // Boosted / featured placement (paid)
-  boostedUntil DateTime?
+  // Paid placement (denormalised from Boost / FeaturedListing so ranking
+  // queries are cheap; authority is always the dated record).
+  boostedUntil  DateTime?
+  featuredUntil DateTime?
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   expiresAt DateTime?
 
-  // Relations
-  swaps Swap[]
+  swaps        Swap[]
+  reservations OfferReservation[]
+  boosts       Boost[]
+  featured     FeaturedListing[]
 
   @@index([userId])
-  @@index([status])
-  @@index([haveCurrency, wantCurrency])
+  @@index([status, expiresAt])
+  @@index([status, haveCurrency, wantCurrency])
   @@index([country, city])
+  @@index([availableUntil])
+  @@index([boostedUntil])
+  @@index([featuredUntil])
   @@index([createdAt])
 }
 
 enum OfferStatus {
   ACTIVE
-  MATCHED
+  PAUSED
   COMPLETED
   CANCELLED
   EXPIRED
-  PAUSED
 }
 
 enum OfferVisibility {
@@ -275,89 +403,92 @@ enum OfferVisibility {
   PRIVATE
 }
 
+/// Slice of an offer held for one swap. Created atomically with the swap.
+model OfferReservation {
+  id          String            @id @default(auto()) @map("_id") @db.ObjectId
+  offerId     String            @db.ObjectId
+  offer       SwapOffer         @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  swapId      String            @unique @db.ObjectId
+  amountMinor BigInt
+  status      ReservationStatus @default(HELD)
+  expiresAt   DateTime
+  releasedAt  DateTime?
+  consumedAt  DateTime?
+  createdAt   DateTime          @default(now())
+
+  @@index([offerId, status])
+  @@index([status, expiresAt])
+}
+
+enum ReservationStatus {
+  HELD
+  RELEASED
+  CONSUMED
+  EXPIRED
+}
+
 // ============================================
-// SWAP TRANSACTIONS
+// SWAPS (user ⇄ user — no CashMouver custody)
 // ============================================
 
 model Swap {
   id String @id @default(auto()) @map("_id") @db.ObjectId
 
-  // Parties
-  initiatorId String @db.ObjectId
-  initiator   User   @relation("SwapInitiator", fields: [initiatorId], references: [id])
-  receiverId  String @db.ObjectId
-  receiver    User   @relation("SwapReceiver", fields: [receiverId], references: [id])
+  initiatorId String    @db.ObjectId
+  initiator   User      @relation("SwapInitiator", fields: [initiatorId], references: [id])
+  receiverId  String    @db.ObjectId // the offer owner
+  receiver    User      @relation("SwapReceiver", fields: [receiverId], references: [id])
+  offerId     String    @db.ObjectId
+  offer       SwapOffer @relation(fields: [offerId], references: [id])
 
-  // Linked Offer
-  offerId String    @db.ObjectId
-  offer   SwapOffer @relation(fields: [offerId], references: [id])
+  // Terms as requested (computed server-side from the offer; never trusted
+  // from the client). "have" = offer owner's currency.
+  haveCurrency        String
+  wantCurrency        String
+  requestedHaveMinor  BigInt
+  requestedWantMinor  BigInt
+  requestedRateScaled BigInt
 
-  // Swap Details
-  initiatorGivesCurrency String
-  initiatorGivesAmount   Float // Changed from Decimal to Float
-  receiverGivesCurrency  String
-  receiverGivesAmount    Float // Changed from Decimal to Float
-  agreedExchangeRate     Float // Changed from Decimal to Float
+  // Immutable snapshot taken when the receiver accepts (PENDING → AGREED).
+  agreedHaveMinor  BigInt?
+  agreedWantMinor  BigInt?
+  agreedRateScaled BigInt?
+  agreedAt         DateTime?
 
-  // Meetup Details
-  meetupLocation  String?
-  meetupAddress   String?
-  meetupTime      DateTime?
-  meetupLatitude  Float?
-  meetupLongitude Float?
-  meetupNotes     String?
-
-  // Status Flow
   status SwapStatus @default(PENDING)
 
-  // Confirmations
-  initiatorSentConfirmed     Boolean   @default(false)
-  initiatorSentAt            DateTime?
-  initiatorReceivedConfirmed Boolean   @default(false)
-  initiatorReceivedAt        DateTime?
+  // Completion confirmations — each party confirms they handed over their
+  // cash and received the other's.
+  initiatorConfirmed   Boolean   @default(false)
+  initiatorConfirmedAt DateTime?
+  receiverConfirmed    Boolean   @default(false)
+  receiverConfirmedAt  DateTime?
 
-  receiverSentConfirmed     Boolean   @default(false)
-  receiverSentAt            DateTime?
-  receiverReceivedConfirmed Boolean   @default(false)
-  receiverReceivedAt        DateTime?
-
-  // Completion
+  startedAt          DateTime?
   completedAt        DateTime?
   cancelledAt        DateTime?
-  cancelledBy        String?   @db.ObjectId
+  cancelledBy        String?         @db.ObjectId
+  cancelCode         SwapCancelCode?
   cancellationReason String?
 
-  // Safety
-  securityDepositRequired Boolean @default(false)
-  securityDepositAmount   Float? // Changed from Decimal to Float
-
-  // Reminders
+  expiresAt      DateTime // pending-acceptance expiry
   remindersSent  Int       @default(0)
   lastReminderAt DateTime?
-
-  // Platform fee (take-rate monetization)
-  // Charged on completion; waived for premium members and each user's
-  // first swap when it originated from a completed referral.
-  feeStatus          SwapFeeStatus @default(NONE)
-  initiatorFeeAmount Float?
-  initiatorFeeWaived Boolean       @default(false)
-  initiatorFeePaidAt DateTime?
-  receiverFeeAmount  Float?
-  receiverFeeWaived  Boolean       @default(false)
-  receiverFeePaidAt  DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Relations
+  events   SwapEvent[]
+  meetups  Meetup[]
   messages Message[]
   ratings  Rating[]
   disputes Dispute[]
 
-  @@index([initiatorId])
-  @@index([receiverId])
+  @@index([initiatorId, status])
+  @@index([receiverId, status])
   @@index([offerId])
-  @@index([status])
+  @@index([status, updatedAt])
+  @@index([status, expiresAt])
   @@index([createdAt])
 }
 
@@ -369,17 +500,106 @@ enum SwapStatus {
   COMPLETED
   CANCELLED
   DISPUTED
-  FAILED
-  EXPIRED
 }
 
-enum SwapFeeStatus {
-  NONE // not yet computed (swap not completed)
-  PENDING // computed, awaiting payment from one or both parties
-  PARTIALLY_PAID
-  PAID
-  WAIVED
-  FAILED
+enum SwapCancelCode {
+  REJECTED
+  USER_CANCELLED
+  EXPIRED
+  OFFER_UNAVAILABLE
+  DISPUTE_RESOLUTION
+  ADMIN
+}
+
+/// Append-only audit trail of every swap state change / side effect. The
+/// unique `dedupeKey` makes side effects idempotent (e.g. `COMPLETED:<swapId>`).
+model SwapEvent {
+  id             String        @id @default(auto()) @map("_id") @db.ObjectId
+  swapId         String        @db.ObjectId
+  swap           Swap          @relation(fields: [swapId], references: [id], onDelete: Cascade)
+  actorId        String?       @db.ObjectId
+  eventType      SwapEventType
+  previousStatus SwapStatus?
+  newStatus      SwapStatus?
+  metadata       Json?
+  dedupeKey      String        @unique
+  createdAt      DateTime      @default(now())
+
+  @@index([swapId, createdAt])
+  @@index([eventType])
+}
+
+enum SwapEventType {
+  CREATED
+  ACCEPTED
+  REJECTED
+  MEETUP_PROPOSED
+  MEETUP_ACCEPTED
+  MEETUP_CANCELLED
+  STARTED
+  PARTY_CONFIRMED
+  COMPLETED
+  CANCELLED
+  EXPIRED
+  DISPUTED
+  DISPUTE_RESOLVED
+  RESERVATION_HELD
+  RESERVATION_RELEASED
+  RESERVATION_CONSUMED
+  SIDE_EFFECTS_APPLIED
+  REMINDER_SENT
+  EXTENSION_REQUESTED
+}
+
+// ============================================
+// MEETUPS
+// ============================================
+
+model Meetup {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  swapId String @db.ObjectId
+  swap   Swap   @relation(fields: [swapId], references: [id], onDelete: Cascade)
+
+  proposedById String  @db.ObjectId
+  parentId     String? @db.ObjectId // meetup this one counter-proposes / reschedules
+
+  locationName       String
+  approximateAddress String // safe to show to both parties before acceptance
+  // Exact venue details are only returned to the two swap participants once
+  // the meetup is ACCEPTED.
+  exactAddress       String?
+  privateNotes       String?
+  location           GeoPoint?
+
+  scheduledAt DateTime
+  status      MeetupStatus @default(PROPOSED)
+
+  initiatorConfirmed Boolean @default(false)
+  receiverConfirmed  Boolean @default(false)
+
+  initiatorCheckedInAt  DateTime?
+  receiverCheckedInAt   DateTime?
+  initiatorCheckedOutAt DateTime?
+  receiverCheckedOutAt  DateTime?
+
+  cancelledById String?   @db.ObjectId
+  cancelledAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([swapId, status])
+  @@index([scheduledAt])
+}
+
+enum MeetupStatus {
+  PROPOSED
+  COUNTER_PROPOSED
+  ACCEPTED
+  RESCHEDULED
+  SUPERSEDED
+  CANCELLED
+  COMPLETED
 }
 
 // ============================================
@@ -398,7 +618,6 @@ model Message {
   messageType MessageType @default(TEXT)
   attachments String[]    @default([])
 
-  isRead    Boolean   @default(false)
   readAt    DateTime?
   isEdited  Boolean   @default(false)
   editedAt  DateTime?
@@ -407,20 +626,31 @@ model Message {
 
   createdAt DateTime @default(now())
 
-  @@index([swapId])
+  @@index([swapId, createdAt])
+  @@index([swapId, readAt])
   @@index([senderId])
-  @@index([createdAt])
 }
 
 enum MessageType {
   TEXT
   IMAGE
-  LOCATION
   SYSTEM
 }
 
+model MessageReport {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  messageId  String   @db.ObjectId
+  reporterId String   @db.ObjectId
+  reason     String
+  status     String   @default("OPEN")
+  createdAt  DateTime @default(now())
+
+  @@unique([messageId, reporterId])
+  @@index([status])
+}
+
 // ============================================
-// RATINGS & REVIEWS
+// RATINGS
 // ============================================
 
 model Rating {
@@ -436,13 +666,11 @@ model Rating {
   stars   Int
   comment String?
 
-  // Rating Categories
   punctuality     Int?
   communication   Int?
   professionalism Int?
   safety          Int?
 
-  // Moderation
   isReported   Boolean @default(false)
   reportReason String?
   isHidden     Boolean @default(false)
@@ -451,12 +679,11 @@ model Rating {
   updatedAt DateTime @updatedAt
 
   @@unique([swapId, giverId])
-  @@index([receiverId])
-  @@index([createdAt])
+  @@index([receiverId, createdAt])
 }
 
 // ============================================
-// DISPUTES & MODERATION
+// DISPUTES
 // ============================================
 
 model Dispute {
@@ -465,27 +692,37 @@ model Dispute {
   swap   Swap   @relation(fields: [swapId], references: [id])
 
   reporterId String @db.ObjectId
-  reporter   User   @relation(fields: [reporterId], references: [id])
+  reporter   User   @relation("DisputeReporter", fields: [reporterId], references: [id])
+  againstId  String @db.ObjectId
+  against    User   @relation("DisputeAgainst", fields: [againstId], references: [id])
 
   reason      DisputeReason
   description String
-  evidence    String[]      @default([])
 
-  status         DisputeStatus   @default(OPEN)
-  priority       DisputePriority @default(MEDIUM)
-  resolution     String?
+  status      DisputeStatus   @default(OPEN)
+  priority    DisputePriority @default(MEDIUM)
+  isEscalated Boolean         @default(false)
+  assignedTo  String?         @db.ObjectId
+
+  // CashMouver never refunds or moves exchanged currency. Outcomes only
+  // affect the swap record, reputation and account standing.
+  outcome        DisputeOutcome?
   resolutionNote String?
   resolvedById   String?         @db.ObjectId
   resolvedBy     User?           @relation("DisputeResolver", fields: [resolvedById], references: [id])
   resolvedAt     DateTime?
+  closedAt       DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  evidence DisputeEvidence[]
+  events   DisputeEvent[]
+
   @@index([swapId])
   @@index([reporterId])
-  @@index([status])
-  @@index([priority])
+  @@index([status, priority])
+  @@index([createdAt])
 }
 
 enum DisputeReason {
@@ -505,7 +742,6 @@ enum DisputeStatus {
   INVESTIGATING
   RESOLVED
   CLOSED
-  ESCALATED
 }
 
 enum DisputePriority {
@@ -513,6 +749,52 @@ enum DisputePriority {
   MEDIUM
   HIGH
   URGENT
+}
+
+enum DisputeOutcome {
+  SWAP_COMPLETED
+  SWAP_CANCELLED
+  WARNING
+  ACCOUNT_RESTRICTION
+  ESCALATED
+  NO_ACTION
+}
+
+model DisputeEvidence {
+  id         String       @id @default(auto()) @map("_id") @db.ObjectId
+  disputeId  String       @db.ObjectId
+  dispute    Dispute      @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+  uploaderId String       @db.ObjectId
+  type       EvidenceType
+  storageKey String // private object key — served only via short-lived signed URLs
+  mimeType   String
+  sizeBytes  Int
+  sha256     String
+  metadata   Json?
+  createdAt  DateTime     @default(now())
+
+  @@index([disputeId])
+}
+
+enum EvidenceType {
+  PHOTO
+  SCREENSHOT
+  DOCUMENT
+  CHAT_EXPORT
+  OTHER
+}
+
+model DisputeEvent {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  disputeId String   @db.ObjectId
+  dispute   Dispute  @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+  actorId   String?  @db.ObjectId
+  type      String
+  note      String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([disputeId, createdAt])
 }
 
 // ============================================
@@ -527,8 +809,14 @@ model Notification {
   type    NotificationType
   title   String
   message String
-  link    String?
-  data    Json?
+
+  // Navigation target — resolved identically by web and mobile from
+  // `route` + `entityId` (see contracts NotificationRoute).
+  route    NotificationRoute
+  entityId String?
+  data     Json?
+  /// Idempotency key for event-driven notifications (not unique: Mongo treats missing fields as equal).
+  dedupeKey String?
 
   isRead  Boolean   @default(false)
   readAt  DateTime?
@@ -538,7 +826,8 @@ model Notification {
 
   createdAt DateTime @default(now())
 
-  @@index([userId, isRead])
+  @@index([userId, isRead, createdAt])
+  @@index([userId, dedupeKey])
   @@index([createdAt])
 }
 
@@ -547,172 +836,819 @@ enum NotificationType {
   SWAP_REQUEST
   SWAP_ACCEPTED
   SWAP_REJECTED
-  MESSAGE_RECEIVED
+  SWAP_STARTED
   SWAP_CONFIRMED
   SWAP_COMPLETED
   SWAP_CANCELLED
+  MEETUP_PROPOSED
+  MEETUP_ACCEPTED
+  MESSAGE_RECEIVED
   RATING_RECEIVED
-  DISPUTE_FILED
+  DISPUTE_OPENED
   DISPUTE_RESOLVED
-  VERIFICATION_APPROVED
-  VERIFICATION_REJECTED
-  PREMIUM_EXPIRING
-  PREMIUM_EXPIRED
+  VERIFICATION_UPDATE
+  OFFER_BOOSTED
+  OFFER_FEATURED
+  OFFER_EXPIRING
+  PAYMENT_SUCCESS
+  PAYMENT_FAILED
+  PLAN_EXPIRING
+  PLAN_EXPIRED
+  RATE_ALERT
+  REFERRAL_UPDATE
   ACCOUNT_WARNING
+  LOGIN_ALERT
   SYSTEM_ALERT
-  PROMOTIONAL
+}
+
+enum NotificationRoute {
+  SWAP_DETAILS
+  MEETUP
+  CHAT
+  DISPUTE
+  OFFER
+  SERVICE_PAYMENT
+  RATE_ALERT
+  VERIFICATION
+  PLAN
+  REFERRALS
+  PROFILE
+  NOTIFICATIONS
+}
+
+model NotificationTemplate {
+  id            String           @id @default(auto()) @map("_id") @db.ObjectId
+  type          NotificationType
+  locale        String           @default("en")
+  titleTemplate String
+  bodyTemplate  String
+  isActive      Boolean          @default(true)
+  updatedBy     String?          @db.ObjectId
+  updatedAt     DateTime         @updatedAt
+
+  @@unique([type, locale])
+}
+
+model PushToken {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  userId String @db.ObjectId
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  token    String  @unique
+  platform String
+  deviceId String?
+  isActive Boolean @default(true)
+
+  createdAt  DateTime @default(now())
+  lastUsedAt DateTime @default(now())
+
+  @@index([userId])
 }
 
 // ============================================
-// REVENUE & TRANSACTIONS
+// SERVICE PRODUCTS, PAYMENTS & LEDGER (money paid TO CashMouver)
 // ============================================
 
-model Transaction {
+/// Admin-configurable catalogue. Prices are NEVER taken from a client.
+model ServiceProduct {
+  id            String             @id @default(auto()) @map("_id") @db.ObjectId
+  code          String             @unique // e.g. PREMIUM_MONTHLY, BOOST_24H
+  kind          ProductKind
+  name          String
+  description   String?
+  amountMinor   Int
+  currency      String // ISO 4217 (lower/upper normalised in code)
+  interval      BillingInterval    @default(ONE_TIME)
+  durationHours Int? // Boost / Featured / Ad duration
+  planTier      PlanTier? // for PREMIUM_PLAN / BUSINESS_PLAN
+  placement     FeaturedPlacement? // for FEATURED
+  trialDays     Int                @default(0)
+  features      String[]           @default([])
+  config        Json? // e.g. { rateLimitPerMinute, monthlyQuota } for API plans
+  isActive      Boolean            @default(true)
+  sortOrder     Int                @default(100)
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  @@index([kind, isActive, sortOrder])
+}
+
+enum ProductKind {
+  PREMIUM_PLAN
+  BUSINESS_PLAN
+  API_PLAN
+  BOOST
+  FEATURED
+  VERIFICATION
+  ADVERTISING
+}
+
+enum BillingInterval {
+  ONE_TIME
+  MONTH
+  YEAR
+}
+
+enum FeaturedPlacement {
+  HOMEPAGE
+  MARKETPLACE_TOP
+  CURRENCY_PAIR
+}
+
+model BillingCustomer {
+  id               String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId           String   @unique @db.ObjectId
+  stripeCustomerId String   @unique
+  createdAt        DateTime @default(now())
+}
+
+/// A payment made to CashMouver for a CashMouver service. Never exchange funds.
+model Payment {
   id     String @id @default(auto()) @map("_id") @db.ObjectId
   userId String @db.ObjectId
   user   User   @relation(fields: [userId], references: [id])
 
-  type     TransactionType
-  amount   Float // Changed from Decimal to Float
-  currency String          @default("USD")
+  productId   String        @db.ObjectId
+  productCode String
+  kind        ProductKind
+  amountMinor Int
+  currency    String // upper-case ISO code
+  status      PaymentStatus @default(REQUIRES_PAYMENT)
 
-  description String
-  status      TransactionStatus @default(PENDING)
+  // What the purchase applies to (offer id, ad campaign id, …).
+  targetType String?
+  targetId   String?
 
-  // Payment Gateway Details
-  paymentMethod        String?
-  paymentGateway       String?
-  gatewayTransactionId String?
-  gatewayResponse      Json?
+  // Deterministic key per business operation → duplicate fulfilment is impossible.
+  idempotencyKey String @unique
 
-  // For revenue tracking
-  platformFee Float? // Changed from Decimal to Float
+  stripeCheckoutSessionId String?
+  stripePaymentIntentId   String?
+  stripeInvoiceId         String?
+  stripeSubscriptionId    String?
 
-  // Metadata
-  metadata Json?
+  fulfilledAt   DateTime?
+  paidAt        DateTime?
+  failedAt      DateTime?
+  failureReason String?
+  refundedMinor Int       @default(0)
+  metadata      Json?
 
-  createdAt   DateTime  @default(now())
-  completedAt DateTime?
-  failedAt    DateTime?
-  refundedAt  DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  @@index([userId])
-  @@index([type])
-  @@index([status])
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@index([stripeCheckoutSessionId])
+  @@index([stripePaymentIntentId])
+  @@index([stripeInvoiceId])
+  @@index([stripeSubscriptionId])
+  @@index([kind, status])
+}
+
+enum PaymentStatus {
+  REQUIRES_PAYMENT
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  EXPIRED
+  PARTIALLY_REFUNDED
+  REFUNDED
+}
+
+/// Immutable record of CashMouver's own revenue / costs. Corrections are new
+/// compensating entries (`reversesId`), never edits. Not a user wallet.
+model LedgerEntry {
+  id          String          @id @default(auto()) @map("_id") @db.ObjectId
+  entryType   LedgerEntryType
+  direction   LedgerDirection
+  amountMinor Int // always positive; direction gives the sign
+  currency    String
+  paymentId   String?         @db.ObjectId
+  userId      String?         @db.ObjectId
+  reversesId  String?         @db.ObjectId
+  reference   String          @unique // idempotency, e.g. payment:<id>:sale
+  description String?
+  createdBy   String?         @db.ObjectId
+  createdAt   DateTime        @default(now())
+
+  @@index([entryType, createdAt])
+  @@index([paymentId])
+  @@index([userId, createdAt])
   @@index([createdAt])
 }
 
-enum TransactionType {
-  VERIFICATION_FEE
+enum LedgerEntryType {
   PREMIUM_SUBSCRIPTION
-  PREMIUM_UPGRADE
-  SECURITY_DEPOSIT
-  SECURITY_DEPOSIT_REFUND
-  DISPUTE_FEE
-  FEATURED_LISTING
-  BOOST_OFFER
-  BULK_SWAP_ACCESS
-  REFERRAL_BONUS
-  SWAP_FEE
-  BUSINESS_API_ACCESS
-  WITHDRAWAL
+  BUSINESS_SUBSCRIPTION
+  API_SUBSCRIPTION
+  BOOST_PURCHASE
+  FEATURED_PURCHASE
+  VERIFICATION_FEE
+  AD_PURCHASE
+  REFUND
+  REFERRAL_REWARD
+  ADJUSTMENT
 }
 
-enum TransactionStatus {
-  PENDING
+enum LedgerDirection {
+  CREDIT
+  DEBIT
+}
+
+model StripeWebhookEvent {
+  id            String             @id @default(auto()) @map("_id") @db.ObjectId
+  stripeEventId String             @unique
+  eventType     String
+  livemode      Boolean            @default(false)
+  objectId      String?
+  payload       Json? // minimal reference, never card data
+  status        WebhookEventStatus @default(RECEIVED)
+  attempts      Int                @default(0)
+  error         String?
+  receivedAt    DateTime           @default(now())
+  processedAt   DateTime?
+
+  @@index([status, receivedAt])
+  @@index([eventType])
+}
+
+enum WebhookEventStatus {
+  RECEIVED
   PROCESSING
-  COMPLETED
+  PROCESSED
   FAILED
-  REFUNDED
-  CANCELLED
+  IGNORED
 }
-
-// ============================================
-// SUBSCRIPTIONS (Stripe-backed premium/business plans)
-// ============================================
 
 model Subscription {
   id     String @id @default(auto()) @map("_id") @db.ObjectId
   userId String @db.ObjectId
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  stripeSubscriptionId String @unique
-  stripePriceId        String
-  planId               String // e.g. PREMIUM_MONTHLY, BUSINESS_YEARLY
+  stripeSubscriptionId String      @unique
+  stripeCustomerId     String
+  productCode          String
+  kind                 ProductKind
+  tier                 PlanTier
 
-  status            SubscriptionStatus @default(ACTIVE)
-  tier              PremiumTier
-  interval          String // "month" | "year"
-  amount            Float
-  currency          String   @default("USD")
-  currentPeriodEnd  DateTime
-  cancelAtPeriodEnd Boolean  @default(false)
+  status             SubscriptionStatus @default(INCOMPLETE)
+  interval           BillingInterval
+  amountMinor        Int
+  currency           String
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  cancelAtPeriodEnd  Boolean            @default(false)
+  canceledAt         DateTime?
+  trialEnd           DateTime?
+  latestInvoiceId    String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@index([userId])
-  @@index([status])
+  @@index([userId, status])
+  @@index([status, currentPeriodEnd])
 }
 
 enum SubscriptionStatus {
-  ACTIVE
-  TRIALING
-  PAST_DUE
-  CANCELLED
   INCOMPLETE
+  TRIALING
+  ACTIVE
+  PAST_DUE
   UNPAID
+  CANCELLED
 }
 
 // ============================================
-// PARTNER / B2B API ACCESS
+// PAID PLACEMENT & ADVERTISING
 // ============================================
+
+model Boost {
+  id          String          @id @default(auto()) @map("_id") @db.ObjectId
+  offerId     String          @db.ObjectId
+  offer       SwapOffer       @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  userId      String          @db.ObjectId
+  paymentId   String          @unique @db.ObjectId
+  productCode String
+  startsAt    DateTime
+  endsAt      DateTime
+  status      PromotionStatus @default(ACTIVE)
+  priceMinor  Int
+  currency    String
+  impressions Int             @default(0)
+  clicks      Int             @default(0)
+  createdAt   DateTime        @default(now())
+
+  @@index([offerId, endsAt])
+  @@index([userId, createdAt])
+  @@index([status, endsAt])
+}
+
+model FeaturedListing {
+  id          String            @id @default(auto()) @map("_id") @db.ObjectId
+  offerId     String            @db.ObjectId
+  offer       SwapOffer         @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  userId      String            @db.ObjectId
+  paymentId   String            @unique @db.ObjectId
+  productCode String
+  placement   FeaturedPlacement
+  startsAt    DateTime
+  endsAt      DateTime
+  status      PromotionStatus   @default(ACTIVE)
+  priceMinor  Int
+  currency    String
+  impressions Int               @default(0)
+  clicks      Int               @default(0)
+  createdAt   DateTime          @default(now())
+
+  @@index([offerId, endsAt])
+  @@index([placement, status, endsAt])
+  @@index([userId, createdAt])
+}
+
+enum PromotionStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+}
+
+/// Daily impression/click counters for Boost, Featured and Ads.
+model PromotionDailyStat {
+  id            String @id @default(auto()) @map("_id") @db.ObjectId
+  promotionType String // BOOST | FEATURED | AD
+  promotionId   String @db.ObjectId
+  day           String // YYYY-MM-DD (UTC)
+  impressions   Int    @default(0)
+  clicks        Int    @default(0)
+
+  @@unique([promotionType, promotionId, day])
+}
+
+model AdCampaign {
+  id           String      @id @default(auto()) @map("_id") @db.ObjectId
+  advertiserId String      @db.ObjectId
+  type         AdType
+  placement    AdPlacement
+  title        String
+  body         String?
+  imageUrl     String?
+  targetUrl    String?
+  offerId      String?     @db.ObjectId
+
+  // Targeting
+  currencies String[] @default([])
+  countries  String[] @default([])
+  cities     String[] @default([])
+
+  status      AdStatus  @default(DRAFT)
+  startsAt    DateTime?
+  endsAt      DateTime?
+  paymentId   String?   @db.ObjectId
+  productCode String?
+  reviewedBy  String?   @db.ObjectId
+  reviewNote  String?
+  reviewedAt  DateTime?
+
+  impressions Int @default(0)
+  clicks      Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, placement, startsAt, endsAt])
+  @@index([advertiserId])
+}
+
+enum AdType {
+  SPONSORED_OFFER
+  SPONSORED_BUSINESS
+  FEATURED_PARTNER
+}
+
+enum AdPlacement {
+  HOMEPAGE
+  MARKETPLACE
+}
+
+enum AdStatus {
+  DRAFT
+  PENDING_PAYMENT
+  PENDING_REVIEW
+  APPROVED
+  ACTIVE
+  PAUSED
+  REJECTED
+  ENDED
+}
+
+// ============================================
+// RATE ALERTS
+// ============================================
+
+model RateAlert {
+  id               String         @id @default(auto()) @map("_id") @db.ObjectId
+  userId           String         @db.ObjectId
+  baseCurrency     String
+  quoteCurrency    String
+  targetRateScaled BigInt
+  direction        AlertDirection
+  isActive         Boolean        @default(true)
+  cooldownMinutes  Int            @default(360)
+  lastTriggeredAt  DateTime?
+  triggerCount     Int            @default(0)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([userId, isActive])
+  @@index([isActive, baseCurrency, quoteCurrency])
+}
+
+enum AlertDirection {
+  ABOVE
+  BELOW
+}
+
+// ============================================
+// BUSINESS & API ACCESS
+// ============================================
+
+model BusinessProfile {
+  id                 String    @id @default(auto()) @map("_id") @db.ObjectId
+  ownerId            String    @unique @db.ObjectId
+  legalName          String
+  tradingName        String?
+  country            String
+  registrationNumber String?
+  website            String?
+  description        String?
+  verified           Boolean   @default(false)
+  verifiedAt         DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+}
+
+model BusinessMember {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  ownerId   String   @db.ObjectId
+  memberId  String   @db.ObjectId
+  role      String   @default("MEMBER")
+  status    String   @default("ACTIVE")
+  invitedAt DateTime @default(now())
+
+  @@unique([ownerId, memberId])
+  @@index([memberId])
+}
 
 model ApiKey {
   id     String @id @default(auto()) @map("_id") @db.ObjectId
   userId String @db.ObjectId
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  name       String // human label, e.g. "Lagos Forex Bureau — production"
-  keyPrefix  String // first 8 chars, shown in dashboards for identification
-  keyHash    String @unique // sha256 of the full key; the raw key is never stored
-  scopes     String[] @default(["rates:read", "offers:read"])
-  isActive   Boolean  @default(true)
+  name      String
+  keyPrefix String // shown in dashboards to identify the key
+  keyHash   String   @unique // sha256 of the full key; the raw key is never stored
+  scopes    String[] @default([])
+  isActive  Boolean  @default(true)
 
-  rateLimitPerMinute Int @default(60)
-  requestCount       Int @default(0)
+  rateLimitPerMinute Int       @default(60)
+  monthlyQuota       Int       @default(10000)
+  requestCount       Int       @default(0)
   lastUsedAt         DateTime?
 
-  createdAt DateTime  @default(now())
-  revokedAt DateTime?
-  expiresAt DateTime?
+  rotatedFromId String?   @db.ObjectId
+  createdAt     DateTime  @default(now())
+  expiresAt     DateTime?
+  revokedAt     DateTime?
+  revokedBy     String?   @db.ObjectId
 
-  // keyHash is already indexed by its @unique constraint above — a
-  // separate @@index([keyHash]) here would be a duplicate index on the
-  // same field, which Prisma's MongoDB connector rejects.
-  @@index([userId])
+  @@index([userId, isActive])
+}
+
+model ApiUsageDaily {
+  id       String @id @default(auto()) @map("_id") @db.ObjectId
+  apiKeyId String @db.ObjectId
+  day      String // YYYY-MM-DD (UTC)
+  count    Int    @default(0)
+  errors   Int    @default(0)
+
+  @@unique([apiKeyId, day])
 }
 
 // ============================================
-// SAVED LOCATIONS
+// VERIFICATION & KYC
+// ============================================
+
+model VerificationCase {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  userId String @db.ObjectId
+  user   User   @relation("CaseOwner", fields: [userId], references: [id])
+
+  type     VerificationCaseType
+  tier     VerificationTier
+  status   VerificationCaseStatus @default(SUBMITTED)
+  provider String                 @default("MANUAL")
+
+  documentType    String
+  documentCountry String
+
+  // Business verification
+  businessName       String?
+  registrationNumber String?
+
+  // Paid enhanced verification is bound to a succeeded Payment.
+  paymentId String? @db.ObjectId
+
+  submittedAt     DateTime  @default(now())
+  reviewStartedAt DateTime?
+  reviewedAt      DateTime?
+  reviewerId      String?   @db.ObjectId
+  rejectionReason String?
+  expiresAt       DateTime?
+  // Documents are deleted from private storage after this date.
+  retainUntil     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  documents VerificationDocument[]
+
+  @@index([userId, status])
+  @@index([status, submittedAt])
+  @@index([expiresAt])
+  @@index([retainUntil])
+}
+
+enum VerificationCaseType {
+  INDIVIDUAL
+  BUSINESS
+}
+
+enum VerificationCaseStatus {
+  SUBMITTED
+  UNDER_REVIEW
+  VERIFIED
+  REJECTED
+  EXPIRED
+}
+
+model VerificationDocument {
+  id         String           @id @default(auto()) @map("_id") @db.ObjectId
+  caseId     String           @db.ObjectId
+  case       VerificationCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  kind       String // ID_FRONT | ID_BACK | SELFIE | BUSINESS_REGISTRATION | PROOF_OF_ADDRESS
+  storageKey String // private (authenticated) object key
+  mimeType   String
+  sizeBytes  Int
+  sha256     String
+  uploadedAt DateTime         @default(now())
+  deletedAt  DateTime?
+
+  @@index([caseId])
+}
+
+// ============================================
+// LIMITS
+// ============================================
+
+/// Configurable limits & feature flags. One row per policy key:
+/// UNVERIFIED, VERIFIED, ENHANCED, PREMIUM, BUSINESS. Monetary limits are
+/// expressed in `limitCurrency` minor units and compared via reference rates.
+model LimitPolicy {
+  id            String @id @default(auto()) @map("_id") @db.ObjectId
+  key           String @unique
+  name          String
+  limitCurrency String @default("EUR")
+
+  maxSwapMinor BigInt
+  dailyMinor   BigInt
+  weeklyMinor  BigInt
+  monthlyMinor BigInt
+
+  maxActiveOffers        Int
+  maxActiveSwaps         Int
+  maxRateAlerts          Int
+  apiCallsPerMonth       Int
+  maxBoostPurchasesMonth Int
+  maxTeamMembers         Int @default(0)
+
+  // Feature flags
+  advancedSearch    Boolean @default(false)
+  priorityMatching  Boolean @default(false)
+  advancedAnalytics Boolean @default(false)
+  premiumBadge      Boolean @default(false)
+  prioritySupport   Boolean @default(false)
+  apiAccess         Boolean @default(false)
+
+  updatedBy String?  @db.ObjectId
+  updatedAt DateTime @updatedAt
+}
+
+// ============================================
+// RISK & ANTI-FRAUD
+// ============================================
+
+model RiskFlag {
+  id         String         @id @default(auto()) @map("_id") @db.ObjectId
+  userId     String?        @db.ObjectId
+  swapId     String?        @db.ObjectId
+  offerId    String?        @db.ObjectId
+  referralId String?        @db.ObjectId
+  type       RiskFlagType
+  severity   RiskSeverity
+  score      Int            @default(0)
+  action     RiskAction     @default(ALLOW)
+  status     RiskFlagStatus @default(OPEN)
+  // Deterministic key so a detector can't spam duplicate open flags.
+  dedupeKey  String         @unique
+  details    Json?
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  reviews RiskReview[]
+
+  @@index([userId, status])
+  @@index([status, severity, createdAt])
+  @@index([type])
+}
+
+enum RiskFlagType {
+  LARGE_EXCHANGE
+  RAPID_ACTIVITY
+  REPEATED_CANCELLATIONS
+  REPEATED_DISPUTES
+  MULTIPLE_ACCOUNTS_DEVICE
+  SUSPICIOUS_LOCATION_CHANGE
+  REFERRAL_ABUSE
+  ABNORMAL_FREQUENCY
+  VERIFICATION_INCONSISTENCY
+  PAYMENT_MISMATCH
+}
+
+enum RiskSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum RiskAction {
+  ALLOW
+  REQUIRE_VERIFICATION
+  LIMIT_AMOUNT
+  SUSPEND_OFFER
+  SUSPEND_TRADING
+  REQUIRE_REVIEW
+}
+
+enum RiskFlagStatus {
+  OPEN
+  REVIEWING
+  DISMISSED
+  ACTIONED
+}
+
+model RiskReview {
+  id         String     @id @default(auto()) @map("_id") @db.ObjectId
+  flagId     String     @db.ObjectId
+  flag       RiskFlag   @relation(fields: [flagId], references: [id], onDelete: Cascade)
+  reviewerId String     @db.ObjectId
+  decision   RiskAction
+  note       String?
+  createdAt  DateTime   @default(now())
+
+  @@index([flagId])
+}
+
+// ============================================
+// REFERRALS & PARTNERS (marketing payouts — not exchange custody)
+// ============================================
+
+model ReferralCode {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String   @unique @db.ObjectId
+  code      String   @unique
+  isPartner Boolean  @default(false)
+  isActive  Boolean  @default(true)
+  clicks    Int      @default(0)
+  createdAt DateTime @default(now())
+}
+
+/// Admin-configured qualification & commission rules.
+model ReferralRule {
+  id                     String             @id @default(auto()) @map("_id") @db.ObjectId
+  code                   String             @unique
+  name                   String
+  // Meaningful qualifying action — never plain sign-up.
+  qualifyingAction       QualifyingAction
+  minCompletedSwaps      Int                @default(1)
+  rewardType             ReferralRewardType @default(FIXED)
+  rewardMinor            Int                @default(0)
+  percentBps             Int                @default(0)
+  currency               String             @default("EUR")
+  isPartnerRule          Boolean            @default(false)
+  monthlyCapPerReferrer  Int                @default(20)
+  lifetimeCapPerReferrer Int                @default(500)
+  holdDays               Int                @default(7) // reward is held for fraud review
+  isActive               Boolean            @default(true)
+  updatedAt              DateTime           @updatedAt
+}
+
+enum QualifyingAction {
+  FIRST_COMPLETED_SWAP
+  VERIFIED_AND_SWAP
+  PAID_PLAN_PURCHASE
+}
+
+enum ReferralRewardType {
+  FIXED
+  PERCENT_OF_SERVICE_REVENUE
+}
+
+model Referral {
+  id         String @id @default(auto()) @map("_id") @db.ObjectId
+  referrerId String @db.ObjectId
+  referrer   User   @relation("ReferralsMade", fields: [referrerId], references: [id])
+  referredId String @unique @db.ObjectId
+  referred   User   @relation("ReferralsReceived", fields: [referredId], references: [id])
+
+  code   String
+  status ReferralStatus @default(PENDING)
+
+  qualifyingAction QualifyingAction?
+  qualifiedAt      DateTime?
+
+  signupDeviceHash String?
+  signupIpHash     String?
+  riskScore        Int      @default(0)
+  fraudFlags       String[] @default([])
+
+  rewardMinor     Int?
+  rewardCurrency  String?
+  rewardLedgerId  String?   @db.ObjectId
+  rewardReleaseAt DateTime?
+  rewardPaidAt    DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([referrerId, status])
+  @@index([status, rewardReleaseAt])
+  @@index([code])
+}
+
+enum ReferralStatus {
+  PENDING
+  QUALIFIED
+  UNDER_REVIEW
+  REWARD_PENDING
+  REWARDED
+  REJECTED
+  EXPIRED
+}
+
+// ============================================
+// MARKET INTELLIGENCE (aggregated only — no PII)
+// ============================================
+
+model MarketRateStat {
+  id             String   @id @default(auto()) @map("_id") @db.ObjectId
+  baseCurrency   String
+  quoteCurrency  String
+  day            String // YYYY-MM-DD (UTC)
+  country        String   @default("ALL")
+  avgRateScaled  BigInt
+  minRateScaled  BigInt
+  maxRateScaled  BigInt
+  bestRateScaled BigInt
+  offerCount     Int
+  swapCount      Int
+  supplyMinor    BigInt
+  demandMinor    BigInt
+  createdAt      DateTime @default(now())
+
+  @@unique([baseCurrency, quoteCurrency, day, country])
+  @@index([day])
+}
+
+// ============================================
+// SOCIAL
 // ============================================
 
 model SavedLocation {
   id     String @id @default(auto()) @map("_id") @db.ObjectId
   userId String @db.ObjectId
-  user   User   @relation("SavedLocations", fields: [userId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  name      String
-  address   String
-  latitude  Float
-  longitude Float
-  city      String
-  state     String?
-  country   String
-  placeId   String?
+  name     String
+  address  String
+  location GeoPoint
+  city     String
+  state    String?
+  country  String
+  placeId  String?
 
   isPrimary Boolean @default(false)
-  isPublic  Boolean @default(true)
   category  String?
 
   createdAt DateTime @default(now())
@@ -720,10 +1656,6 @@ model SavedLocation {
 
   @@index([userId])
 }
-
-// ============================================
-// BLOCKED USERS
-// ============================================
 
 model BlockedUser {
   id        String @id @default(auto()) @map("_id") @db.ObjectId
@@ -736,63 +1668,8 @@ model BlockedUser {
   createdAt DateTime @default(now())
 
   @@unique([blockerId, blockedId])
-  @@index([blockerId])
   @@index([blockedId])
 }
-
-// ============================================
-// EXCHANGE RATE HISTORY
-// ============================================
-
-model ExchangeRateSnapshot {
-  id String @id @default(auto()) @map("_id") @db.ObjectId
-
-  fromCurrency String
-  toCurrency   String
-  rate         Float // Changed from Decimal to Float
-  source       String @default("ECB")
-
-  createdAt DateTime @default(now())
-
-  @@index([fromCurrency, toCurrency, createdAt])
-}
-
-// ============================================
-// REFERRAL SYSTEM
-// ============================================
-
-model Referral {
-  id         String @id @default(auto()) @map("_id") @db.ObjectId
-  referrerId String @db.ObjectId
-  referrer   User   @relation("ReferralsMade", fields: [referrerId], references: [id])
-  referredId String @db.ObjectId
-  referred   User   @relation("ReferralsReceived", fields: [referredId], references: [id])
-
-  code   String         @unique
-  status ReferralStatus @default(PENDING)
-
-  // Rewards
-  referrerReward Float? // Changed from Decimal to Float
-  referredReward Float? // Changed from Decimal to Float
-  rewardPaidAt   DateTime?
-
-  createdAt   DateTime  @default(now())
-  completedAt DateTime?
-
-  @@index([referrerId])
-  @@index([referredId])
-}
-
-enum ReferralStatus {
-  PENDING
-  COMPLETED
-  REWARDED
-  EXPIRED
-}
-
-// ============================================
-// FAVORITES
-// ============================================
 
 model FavoriteUser {
   id         String @id @default(auto()) @map("_id") @db.ObjectId
@@ -806,66 +1683,16 @@ model FavoriteUser {
   createdAt DateTime @default(now())
 
   @@unique([userId, favoriteId])
-  @@index([userId])
 }
 
 // ============================================
-// SECURITY DEPOSITS
-// ============================================
-
-model SecurityDeposit {
-  id     String  @id @default(auto()) @map("_id") @db.ObjectId
-  userId String  @db.ObjectId
-  user   User    @relation("SecurityDeposits", fields: [userId], references: [id])
-  swapId String? @unique @db.ObjectId
-
-  amount   Float // Changed from Decimal to Float
-  currency String        @default("USD")
-  status   DepositStatus @default(HELD)
-
-  heldAt         DateTime  @default(now())
-  releasedAt     DateTime?
-  releasedReason String?
-
-  @@index([userId])
-  @@index([status])
-}
-
-enum DepositStatus {
-  HELD
-  RELEASED
-  FORFEITED
-}
-
-// ============================================
-// PUSH NOTIFICATION TOKENS
-// ============================================
-
-model PushToken {
-  id     String @id @default(auto()) @map("_id") @db.ObjectId
-  userId String @db.ObjectId
-  user   User   @relation("PushTokens", fields: [userId], references: [id], onDelete: Cascade)
-
-  token    String  @unique
-  platform String
-  deviceId String?
-  isActive Boolean @default(true)
-
-  createdAt  DateTime @default(now())
-  lastUsedAt DateTime @default(now())
-
-  @@index([userId])
-  @@index([platform])
-}
-
-// ============================================
-// ACTIVITY LOG
+// ACTIVITY, AUDIT, CONFIG, JOBS
 // ============================================
 
 model ActivityLog {
   id     String @id @default(auto()) @map("_id") @db.ObjectId
   userId String @db.ObjectId
-  user   User   @relation("Activities", fields: [userId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   action      ActivityType
   description String
@@ -896,77 +1723,55 @@ enum ActivityType {
   PASSWORD_RESET_REQUESTED
   PASSWORD_RESET_COMPLETED
   EMAIL_VERIFIED
+  PHONE_VERIFIED
   TWO_FACTOR_ENABLED
   TWO_FACTOR_DISABLED
-  LOCATION_SHARED
+  SESSIONS_REVOKED
   SECURITY_ALERT
 }
 
-// ============================================
-// ADMIN LOG
-// ============================================
-
-model AdminLog {
-  id      String @id @default(auto()) @map("_id") @db.ObjectId
-  adminId String @db.ObjectId
-  admin   User   @relation(fields: [adminId], references: [id])
-
-  action     AdminAction
+/// Append-only audit trail of security- and money-relevant admin actions.
+model AuditLog {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  actorId    String?  @db.ObjectId
+  actorRole  String?
+  action     String
   targetType String
-  targetId   String      @db.ObjectId
-  details    String?
-  changes    Json?
+  targetId   String?
+  before     Json?
+  after      Json?
+  reason     String?
   ipAddress  String?
+  userAgent  String?
+  requestId  String?
+  createdAt  DateTime @default(now())
 
-  createdAt DateTime @default(now())
-
-  @@index([adminId])
+  @@index([actorId, createdAt])
   @@index([targetType, targetId])
+  @@index([action, createdAt])
   @@index([createdAt])
 }
 
-enum AdminAction {
-  USER_BANNED
-  USER_UNBANNED
-  USER_VERIFIED
-  USER_REJECTED
-  DISPUTE_RESOLVED
-  CONTENT_MODERATED
-  ROLE_CHANGED
-  SYSTEM_CONFIG_UPDATED
-  BULK_ACTION
-}
-
-// ============================================
-// SYSTEM CONFIG
-// ============================================
-
 model SystemConfig {
-  id          String  @id @default(auto()) @map("_id") @db.ObjectId
-  key         String  @unique
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  key         String   @unique
   value       String
-  dataType    String  @default("string")
+  dataType    String   @default("string")
   description String?
   category    String?
-  isPublic    Boolean @default(false)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  isPublic    Boolean  @default(false)
+  updatedBy   String?  @db.ObjectId
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   @@index([category])
 }
 
-// ============================================
-// APP ANALYTICS
-// ============================================
-
-model Analytics {
-  id String @id @default(auto()) @map("_id") @db.ObjectId
-
-  date     DateTime @default(now())
-  metric   String
-  value    Float
-  metadata Json?
-
-  @@index([date, metric])
+/// Mongo-backed lease so scheduled jobs run once across instances.
+model JobLock {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  name        String    @unique
+  lockedUntil DateTime
+  lockedBy    String?
+  lastRunAt   DateTime?
 }

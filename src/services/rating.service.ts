@@ -1,487 +1,92 @@
-// src/services/rating.service.ts
 import { prisma } from '@/config/database';
-import { PaginationParams } from '@/utils/pagination.util';
-import { NotFoundError, ForbiddenError, BadRequestError } from '@/utils/error.util';
-import logger from '@/utils/logger.util';
+import { toPublicUser } from '@/presenters/user.presenter';
+import { ConflictError, ForbiddenError, InvalidStateError, NotFoundError, ValidationError } from '@/utils/error.util';
+import { cleanText } from './message.service';
+import { notificationService } from './notification.service';
+
+export interface RateInput {
+  stars: number;
+  comment?: string;
+  punctuality?: number;
+  communication?: number;
+  professionalism?: number;
+  safety?: number;
+}
+
+const inRange = (n?: number) => n === undefined || (Number.isInteger(n) && n >= 1 && n <= 5);
 
 export class RatingService {
-  /**
-   * Create a rating
-   */
-  async createRating(userId: string, ratingData: any) {
-    // Validate swap exists and user is part of it
-    const swap = await prisma.swap.findUnique({
-      where: { id: ratingData.swapId },
-      include: {
-        initiator: true,
-        receiver: true,
-      },
-    });
-
-    if (!swap) {
-      throw new NotFoundError('Swap not found');
+  async rate(giverId: string, swapId: string, input: RateInput) {
+    if (![input.stars, input.punctuality, input.communication, input.professionalism, input.safety].every(inRange)) throw new ValidationError('Ratings must be whole numbers from 1 to 5');
+    const swap = await prisma.swap.findUnique({ where: { id: swapId } });
+    if (!swap || (swap.initiatorId !== giverId && swap.receiverId !== giverId)) throw new NotFoundError('Swap not found');
+    if (swap.status !== 'COMPLETED') throw new InvalidStateError('You can rate a swap once it is completed');
+    const receiverId = swap.initiatorId === giverId ? swap.receiverId : swap.initiatorId;
+    try {
+      const r = await prisma.rating.create({
+        data: { swapId, giverId, receiverId, stars: input.stars, comment: input.comment ? cleanText(input.comment).slice(0, 500) : undefined, punctuality: input.punctuality, communication: input.communication, professionalism: input.professionalism, safety: input.safety },
+      });
+      await this.recomputeTrust(receiverId);
+      const giver = await prisma.user.findUnique({ where: { id: giverId }, select: { name: true } });
+      await notificationService.notify({ userId: receiverId, type: 'RATING_RECEIVED', entityId: swapId, params: { name: giver?.name.split(' ')[0] ?? '' }, dedupeKey: `rating:${r.id}` });
+      return r;
+    } catch (e) {
+      if ((e as { code?: string }).code === 'P2002') throw new ConflictError('You have already rated this swap');
+      throw e;
     }
-
-    // Check if user is part of the swap
-    if (swap.initiatorId !== userId && swap.receiverId !== userId) {
-      throw new ForbiddenError('You can only rate swaps you participated in');
-    }
-
-    // Determine receiver (the other person in the swap)
-    const receiverId = swap.initiatorId === userId ? swap.receiverId : swap.initiatorId;
-
-    // Check if rating already exists
-    const existingRating = await prisma.rating.findUnique({
-      where: {
-        swapId_giverId: {
-          swapId: ratingData.swapId,
-          giverId: userId,
-        },
-      },
-    });
-
-    if (existingRating) {
-      throw new BadRequestError('You have already rated this swap');
-    }
-
-    // Validate star rating
-    if (ratingData.stars < 1 || ratingData.stars > 5) {
-      throw new BadRequestError('Stars must be between 1 and 5');
-    }
-
-    // Create rating
-    const rating = await prisma.rating.create({
-      data: {
-        swapId: ratingData.swapId,
-        giverId: userId,
-        receiverId,
-        stars: ratingData.stars,
-        comment: ratingData.comment,
-        punctuality: ratingData.punctuality,
-        communication: ratingData.communication,
-        professionalism: ratingData.professionalism,
-        safety: ratingData.safety,
-      },
-      include: {
-        giver: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-          },
-        },
-        receiver: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-          },
-        },
-      },
-    });
-
-    // Update user's average rating
-    await this.updateUserRating(receiverId);
-
-    // Send notification
-    await prisma.notification.create({
-      data: {
-        userId: receiverId,
-        type: 'RATING_RECEIVED',
-        title: 'New Rating',
-        message: `${rating.giver.name} rated you ${ratingData.stars} stars`,
-        link: `/ratings/${rating.id}`,
-      },
-    });
-
-    logger.info(`Rating created: ${rating.id} for swap ${ratingData.swapId}`);
-
-    return rating;
   }
 
-  /**
-   * Update user's average rating
-   */
-  private async updateUserRating(userId: string) {
-    const ratings = await prisma.rating.aggregate({
-      where: { 
-        receiverId: userId,
-        isHidden: false,
-      },
-      _avg: { stars: true },
-      _count: true,
-    });
-
-    await prisma.user.update({
-      where: { id: userId },
-      data: { 
-        rating: ratings._avg.stars || 0,
-      },
-    });
-
-    logger.info(`Updated rating for user ${userId}: ${ratings._avg.stars || 0}`);
-  }
-
-  /**
-   * Get ratings for a user
-   */
-  async getUserRatings(userId: string, pagination: PaginationParams) {
-    const { page, perPage } = pagination;
-    const skip = (page - 1) * perPage;
-
-    const [ratings, total] = await Promise.all([
-      prisma.rating.findMany({
-        where: { 
-          receiverId: userId,
-          isHidden: false,
-        },
-        skip,
-        take: perPage,
-        orderBy: { createdAt: 'desc' },
-        include: {
-          giver: {
-            select: {
-              id: true,
-              name: true,
-              image: true,
-              rating: true,
-            },
-          },
-          swap: {
-            select: {
-              id: true,
-              status: true,
-            },
-          },
-        },
-      }),
-      prisma.rating.count({ 
-        where: { 
-          receiverId: userId,
-          isHidden: false,
-        },
-      }),
+  async forUser(userId: string, page: number, perPage: number) {
+    const where = { receiverId: userId, isHidden: false };
+    const [rows, total] = await Promise.all([
+      prisma.rating.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (page - 1) * perPage, take: perPage, include: { giver: true } }),
+      prisma.rating.count({ where }),
     ]);
-
-    return {
-      data: ratings,
-      meta: {
-        page,
-        perPage,
-        total,
-        totalPages: Math.ceil(total / perPage),
-        hasMore: page < Math.ceil(total / perPage),
-      },
-    };
-  }
-
-  /**
-   * Get ratings for a specific swap
-   */
-  async getSwapRatings(swapId: string, userId: string) {
-    // Verify user has access to this swap
-    const swap = await prisma.swap.findUnique({
-      where: { id: swapId },
-    });
-
-    if (!swap) {
-      throw new NotFoundError('Swap not found');
-    }
-
-    if (swap.initiatorId !== userId && swap.receiverId !== userId) {
-      throw new ForbiddenError('You can only view ratings for your own swaps');
-    }
-
-    const ratings = await prisma.rating.findMany({
-      where: { swapId },
-      include: {
-        giver: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-          },
-        },
-        receiver: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-          },
-        },
-      },
-    });
-
-    return ratings;
-  }
-
-  /**
-   * Get rating by ID
-   */
-  async getRatingById(ratingId: string) {
-    const rating = await prisma.rating.findUnique({
-      where: { id: ratingId },
-      include: {
-        giver: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-            rating: true,
-          },
-        },
-        receiver: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-            rating: true,
-          },
-        },
-        swap: {
-          select: {
-            id: true,
-            status: true,
-          },
-        },
-      },
-    });
-
-    if (!rating) {
-      throw new NotFoundError('Rating not found');
-    }
-
-    return rating;
-  }
-
-  /**
-   * Update a rating
-   */
-  async updateRating(ratingId: string, userId: string, updateData: any) {
-    const rating = await prisma.rating.findUnique({
-      where: { id: ratingId },
-    });
-
-    if (!rating) {
-      throw new NotFoundError('Rating not found');
-    }
-
-    if (rating.giverId !== userId) {
-      throw new ForbiddenError('You can only update your own ratings');
-    }
-
-    // Validate stars if being updated
-    if (updateData.stars && (updateData.stars < 1 || updateData.stars > 5)) {
-      throw new BadRequestError('Stars must be between 1 and 5');
-    }
-
-    const updatedRating = await prisma.rating.update({
-      where: { id: ratingId },
-      data: {
-        stars: updateData.stars,
-        comment: updateData.comment,
-        punctuality: updateData.punctuality,
-        communication: updateData.communication,
-        professionalism: updateData.professionalism,
-        safety: updateData.safety,
-      },
-      include: {
-        giver: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-          },
-        },
-        receiver: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-          },
-        },
-      },
-    });
-
-    // Update user's average rating if stars changed
-    if (updateData.stars) {
-      await this.updateUserRating(rating.receiverId);
-    }
-
-    logger.info(`Rating updated: ${ratingId} by user ${userId}`);
-
-    return updatedRating;
-  }
-
-  /**
-   * Delete a rating
-   */
-  async deleteRating(ratingId: string, userId: string) {
-    const rating = await prisma.rating.findUnique({
-      where: { id: ratingId },
-    });
-
-    if (!rating) {
-      throw new NotFoundError('Rating not found');
-    }
-
-    if (rating.giverId !== userId) {
-      throw new ForbiddenError('You can only delete your own ratings');
-    }
-
-    const receiverId = rating.receiverId;
-
-    await prisma.rating.delete({
-      where: { id: ratingId },
-    });
-
-    // Recalculate user's rating after deletion
-    await this.updateUserRating(receiverId);
-
-    logger.info(`Rating deleted: ${ratingId} by user ${userId}`);
-  }
-
-  /**
-   * Report a rating
-   */
-  async reportRating(ratingId: string, userId: string, reason: string) {
-    const rating = await prisma.rating.findUnique({
-      where: { id: ratingId },
-    });
-
-    if (!rating) {
-      throw new NotFoundError('Rating not found');
-    }
-
-    if (rating.giverId === userId) {
-      throw new BadRequestError('You cannot report your own rating');
-    }
-
-    await prisma.rating.update({
-      where: { id: ratingId },
-      data: {
-        isReported: true,
-        reportReason: reason,
-      },
-    });
-
-    // Create admin log for moderation
-    await prisma.adminLog.create({
-      data: {
-        adminId: userId,
-        action: 'CONTENT_MODERATED',
-        targetType: 'Rating',
-        targetId: ratingId,
-        details: `Rating reported: ${reason}`,
-      },
-    });
-
-    logger.warn(`Rating reported: ${ratingId} by user ${userId} - Reason: ${reason}`);
-  }
-
-  /**
-   * Mark rating as helpful (future feature)
-   */
-  async markAsHelpful(ratingId: string, userId: string) {
-    const rating = await prisma.rating.findUnique({
-      where: { id: ratingId },
-    });
-
-    if (!rating) {
-      throw new NotFoundError('Rating not found');
-    }
-
-    // This would require a separate table for helpful votes
-    // For now, just log the action
-    logger.info(`Rating ${ratingId} marked as helpful by user ${userId}`);
-  }
-
-  /**
-   * Get pending ratings for user (swaps that need to be rated)
-   */
-  async getPendingRatings(userId: string) {
-    // Find completed swaps where user hasn't given a rating yet
-    const completedSwaps = await prisma.swap.findMany({
-      where: {
-        OR: [
-          { initiatorId: userId },
-          { receiverId: userId },
-        ],
-        status: 'COMPLETED',
-      },
-      include: {
-        initiator: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-          },
-        },
-        receiver: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-          },
-        },
-        ratings: {
-          where: {
-            giverId: userId,
-          },
-        },
-      },
-    });
-
-    // Filter swaps that don't have a rating from this user
-    const pendingSwaps = completedSwaps.filter(swap => swap.ratings.length === 0);
-
-    return pendingSwaps.map(swap => ({
-      swapId: swap.id,
-      otherUser: swap.initiatorId === userId ? swap.receiver : swap.initiator,
-      completedAt: swap.completedAt,
-    }));
-  }
-
-  /**
-   * Get rating statistics for a user
-   */
-  async getRatingStats(userId: string) {
-    const [total, breakdown, avg] = await Promise.all([
-      prisma.rating.count({
-        where: { receiverId: userId, isHidden: false },
-      }),
-      prisma.rating.groupBy({
-        by: ['stars'],
-        where: { receiverId: userId, isHidden: false },
-        _count: {
-          stars: true,
-        },
-      }),
-      prisma.rating.aggregate({
-        where: { receiverId: userId, isHidden: false },
-        _avg: {
-          stars: true,
-          punctuality: true,
-          communication: true,
-          professionalism: true,
-          safety: true,
-        },
-      }),
-    ]);
-
     return {
       total,
-      average: avg._avg.stars || 0,
-      breakdown: breakdown.reduce((acc, item) => {
-        acc[`${item.stars}_stars`] = item._count.stars;
-        return acc;
-      }, {} as Record<string, number>),
-      categories: {
-        punctuality: avg._avg.punctuality || 0,
-        communication: avg._avg.communication || 0,
-        professionalism: avg._avg.professionalism || 0,
-        safety: avg._avg.safety || 0,
-      },
+      items: rows.map((r) => ({ id: r.id, stars: r.stars, comment: r.comment, punctuality: r.punctuality, communication: r.communication, professionalism: r.professionalism, safety: r.safety, createdAt: r.createdAt.toISOString(), giver: toPublicUser(r.giver) })),
     };
   }
+
+  async report(userId: string, ratingId: string, reason: string) {
+    const r = await prisma.rating.findUnique({ where: { id: ratingId } });
+    if (!r) throw new NotFoundError('Rating not found');
+    if (r.receiverId !== userId) throw new ForbiddenError('Only the rated user can report a rating');
+    await prisma.rating.update({ where: { id: ratingId }, data: { isReported: true, reportReason: cleanText(reason).slice(0, 500) } });
+  }
+
+  async hide(ratingId: string, hidden: boolean) {
+    const r = await prisma.rating.update({ where: { id: ratingId }, data: { isHidden: hidden } });
+    await this.recomputeTrust(r.receiverId);
+  }
+
+  /**
+   * Trust score (0–100). Transparent weights:
+   *   ratings 40 · reliability 25 · experience 10 · verification 25 · − disputes up to 15
+   */
+  async recomputeTrust(userId: string): Promise<void> {
+    const [user, agg] = await Promise.all([
+      prisma.user.findUnique({ where: { id: userId } }),
+      prisma.rating.aggregate({ where: { receiverId: userId, isHidden: false }, _avg: { stars: true }, _count: true }),
+    ]);
+    if (!user) return;
+    const avg = agg._avg.stars ?? 0;
+    const n = agg._count;
+    // Few ratings pull toward neutral (3.5) so one 5★ cannot max the score.
+    const shrunk = (avg * n + 3.5 * 3) / (n + 3);
+    const ratingPts = n === 0 ? 20 : 40 * ((shrunk - 1) / 4);
+
+    const attempts = user.successfulSwaps + user.cancelledSwaps + user.disputedSwaps;
+    const reliability = attempts === 0 ? 0.5 : user.successfulSwaps / attempts;
+    const reliabilityPts = 25 * reliability;
+    const experiencePts = 10 * Math.min(user.successfulSwaps, 20) / 20;
+    const verified = user.idVerified && user.verificationStatus === 'VERIFIED';
+    const verificationPts = (verified ? 15 : 0) + (user.phoneVerified ? 5 : 0) + (user.emailVerified ? 3 : 0) + (user.businessVerified ? 2 : 0);
+    const disputeRate = user.totalSwaps > 0 ? user.disputedSwaps / user.totalSwaps : 0;
+    const disputePenalty = 15 * Math.min(1, disputeRate * 4);
+    const trust = Math.max(0, Math.min(100, Math.round(ratingPts + reliabilityPts + experiencePts + verificationPts - disputePenalty)));
+    await prisma.user.update({ where: { id: userId }, data: { trustScore: trust, rating: Math.round(avg * 100) / 100, confirmationRate: Math.round(reliability * 100) } });
+  }
 }
+
+export const ratingService = new RatingService();

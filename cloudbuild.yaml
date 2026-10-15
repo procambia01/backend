@@ -1,44 +1,38 @@
+# Cloud Build -> Artifact Registry -> Cloud Run
+# Run from the backend/ folder:  gcloud builds submit --config cloudbuild.yaml .
 substitutions:
-  _REGION: us-central1 # change to your Artifact Registry / Cloud Run region
-  _REPO: backend-repo # Artifact Registry repo name from step 2
-  _SERVICE: backend-service # Cloud Run service name
-  _VPC_CONNECTOR: '' # e.g. "projects/PROJECT_ID/locations/us-central1/connectors/redis-connector" (leave blank if unused)
+  _REGION: europe-west1        # pick the region closest to your users
+  _REPO: cashmouver            # Artifact Registry repo
+  _SERVICE: cashmouver-api     # Cloud Run service name
+  _WEB_ORIGIN: https://cashmouver.com
+  _API_ORIGIN: https://api.cashmouver.com
 
 steps:
-  # 1. Build the Docker image
   - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'build'
-      - '-t'
-      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA'
-      - '-t'
-      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest'
-      - '.'
-
-  # 2. Push both tags to Artifact Registry
+    args: ['build','-t','${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA','-t','${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest','.']
   - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'push'
-      - '--all-tags'
-      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}'
-
-  # 3. Deploy to Cloud Run
+    args: ['push','--all-tags','${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}']
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
-      - 'run'
-      - 'deploy'
-      - '${_SERVICE}'
-      - '--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA'
-      - '--region=${_REGION}'
-      - '--platform=managed'
-      - '--allow-unauthenticated'
-      # Non-secret env vars — add/remove as needed:
-      - '--set-env-vars=NODE_ENV=production'
-      # Secrets pulled from Secret Manager — add one --set-secrets flag per var,
-      # or comma-separate them, e.g.:
-      # --set-secrets=DATABASE_URL=DATABASE_URL:latest,JWT_SECRET=JWT_SECRET:latest
-      - '--set-secrets=DATABASE_URL=DATABASE_URL:latest,JWT_SECRET=JWT_SECRET:latest,JWT_REFRESH_SECRET=JWT_REFRESH_SECRET:latest,BETTER_AUTH_SECRET=BETTER_AUTH_SECRET:latest,SESSION_SECRET=SESSION_SECRET:latest,COOKIE_SECRET=COOKIE_SECRET:latest,REDIS_URL=REDIS_URL:latest,STRIPE_SECRET_KEY=STRIPE_SECRET_KEY:latest,STRIPE_WEBHOOK_SECRET=STRIPE_WEBHOOK_SECRET:latest'
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA
+      - --region=${_REGION}
+      - --platform=managed
+      - --allow-unauthenticated
+      - --port=8080
+      # Socket.IO + cron: keep exactly one always-on instance, CPU always allocated.
+      - --min-instances=1
+      - --max-instances=1
+      - --no-cpu-throttling
+      - --session-affinity
+      - --timeout=3600
+      - --memory=512Mi
+      # '^|^' makes '|' the separator so ALLOWED_ORIGINS can contain commas.
+      - '--set-env-vars=^|^NODE_ENV=production|TRUST_PROXY=1|APP_URL=${_WEB_ORIGIN}|API_URL=${_API_ORIGIN}/api/v1|CORS_ORIGIN=${_WEB_ORIGIN}|ALLOWED_ORIGINS=${_WEB_ORIGIN},https://www.cashmouver.com|CLOUDINARY_CLOUD_NAME=REPLACE_ME|EMAIL_DRIVER=resend|EMAIL_FROM=no-reply@cashmouver.com|SMS_DRIVER=twilio|TWILIO_ACCOUNT_SID=REPLACE_ME|TWILIO_PHONE_NUMBER=REPLACE_ME|ENABLE_CRON_JOBS=true'
+      - '--set-secrets=DATABASE_URL=DATABASE_URL:latest,JWT_SECRET=JWT_SECRET:latest,JWT_REFRESH_SECRET=JWT_REFRESH_SECRET:latest,COOKIE_SECRET=COOKIE_SECRET:latest,HASH_PEPPER=HASH_PEPPER:latest,DATA_ENCRYPTION_KEY=DATA_ENCRYPTION_KEY:latest,CLOUDINARY_API_KEY=CLOUDINARY_API_KEY:latest,CLOUDINARY_API_SECRET=CLOUDINARY_API_SECRET:latest,STRIPE_SECRET_KEY=STRIPE_SECRET_KEY:latest,STRIPE_WEBHOOK_SECRET=STRIPE_WEBHOOK_SECRET:latest,STRIPE_PUBLISHABLE_KEY=STRIPE_PUBLISHABLE_KEY:latest,RESEND_API_KEY=RESEND_API_KEY:latest,TWILIO_AUTH_TOKEN=TWILIO_AUTH_TOKEN:latest'
 
 images:
   - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA'

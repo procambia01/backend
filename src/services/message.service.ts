@@ -1,658 +1,194 @@
-// src/services/message.service.ts
+import type { Message, Swap } from '@prisma/client';
 import { prisma } from '@/config/database';
-import { PaginationParams } from '@/utils/pagination.util';
-import { MessageType } from '@prisma/client';
-import {
-  NotFoundError,
-  ForbiddenError,
-  BadRequestError,
-} from '@/utils/error.util';
-import logger from '@/utils/logger.util';
-import { UploadService } from './upload.service';
+import type { ConversationDto, MessageDto } from '@/contracts';
+import { emitToUser } from '@/lib/realtime';
+import { IMAGE_UPLOAD_POLICY, UploadValidationError, validateUpload } from '@/lib/file-signature';
+import { sha256Hex } from '@/lib/crypto';
+import { roleOf } from '@/presenters/swap.presenter';
+import { toPublicUser } from '@/presenters/user.presenter';
+import { ForbiddenError, InvalidStateError, NotFoundError, UploadInvalidError, ValidationError } from '@/utils/error.util';
+import { notificationService } from './notification.service';
+import { storageService } from './storage.service';
 
+const EDIT_WINDOW_MS = 5 * 60_000;
+const CLOSED_CHAT_GRACE_MS = 3 * 86_400_000;
+const MAX_ATTACHMENTS = 3;
+
+/** Strips control characters; content is rendered as text by every client (never HTML). */
+export const cleanText = (s: string) => s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim();
+
+const attachmentPath = (id: string, i: number) => `/api/v1/messages/${id}/attachments/${i}`;
+
+export const toMessageDto = (m: Message): MessageDto => ({
+  id: m.id,
+  swapId: m.swapId,
+  senderId: m.senderId,
+  content: m.isDeleted ? '' : m.content,
+  messageType: m.messageType,
+  attachments: m.isDeleted ? [] : m.attachments.map((_, i) => attachmentPath(m.id, i)),
+  readAt: m.readAt?.toISOString() ?? null,
+  createdAt: m.createdAt.toISOString(),
+  isDeleted: m.isDeleted,
+  isEdited: m.isEdited,
+});
+
+/**
+ * The ONLY place messages are created. Other services (swap, dispute…) call
+ * into this class instead of writing to the collection themselves.
+ */
 export class MessageService {
-  private uploadService: UploadService;
-
-  constructor() {
-    this.uploadService = new UploadService();
+  private async participantSwap(swapId: string, userId: string): Promise<Swap> {
+    const swap = await prisma.swap.findUnique({ where: { id: swapId } });
+    if (!swap || !roleOf(swap, userId)) throw new NotFoundError('Conversation not found');
+    return swap;
   }
 
-  /**
-   * Get all conversations for a user
-   */
-  async getConversations(userId: string) {
-    // Get all swaps where user is involved
-    const swaps = await prisma.swap.findMany({
-      where: {
-        OR: [{ initiatorId: userId }, { receiverId: userId }],
-      },
-      include: {
-        initiator: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-            rating: true,
-          },
-        },
-        receiver: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-            rating: true,
-          },
-        },
-        messages: {
-          take: 1,
-          orderBy: { createdAt: 'desc' },
-          where: { isDeleted: false },
-          select: {
-            id: true,
-            content: true,
-            createdAt: true,
-            isRead: true,
-            senderId: true,
-            messageType: true,
-          },
-        },
-        _count: {
-          select: {
-            messages: {
-              where: {
-                senderId: { not: userId },
-                isRead: false,
-                isDeleted: false,
-              },
-            },
-          },
-        },
-      },
-      orderBy: {
-        updatedAt: 'desc',
-      },
-    });
-
-    // Format conversations
-    const conversations = swaps.map(swap => {
-      const otherUser =
-        swap.initiatorId === userId ? swap.receiver : swap.initiator;
-      const lastMessage = swap.messages[0] || null;
-      const unreadCount = swap._count.messages;
-
-      return {
-        swapId: swap.id,
-        otherUser,
-        lastMessage,
-        unreadCount,
-        updatedAt: swap.updatedAt,
-      };
-    });
-
-    return conversations;
+  private async assertOpen(swap: Swap, senderId: string): Promise<string> {
+    const other = swap.initiatorId === senderId ? swap.receiverId : swap.initiatorId;
+    const blocked = await prisma.blockedUser.count({ where: { OR: [{ blockerId: senderId, blockedId: other }, { blockerId: other, blockedId: senderId }] } });
+    if (blocked) throw new ForbiddenError('You cannot message this user');
+    if (['COMPLETED', 'CANCELLED'].includes(swap.status)) {
+      const closedAt = swap.completedAt ?? swap.cancelledAt ?? swap.updatedAt;
+      if (Date.now() - closedAt.getTime() > CLOSED_CHAT_GRACE_MS) throw new InvalidStateError('This conversation is closed');
+    }
+    return other;
   }
 
-  /**
-   * Get messages for a specific swap
-   */
-  async getSwapMessages(
-    swapId: string,
-    userId: string,
-    pagination: PaginationParams
-  ) {
-    // Verify user has access to this swap
-    const swap = await prisma.swap.findUnique({
-      where: { id: swapId },
-    });
+  private async deliver(m: Message, swap: Swap, receiverId: string, senderId: string) {
+    const dto = toMessageDto(m);
+    emitToUser(receiverId, 'message:new', dto);
+    emitToUser(senderId, 'message:sent', dto);
+    emitToUser(receiverId, 'message:unread', { swapId: swap.id, total: await this.unreadTotal(receiverId) });
+    // One notification per 5 minutes per conversation, not one per message.
+    const bucket = Math.floor(Date.now() / 300_000);
+    const sender = await prisma.user.findUnique({ where: { id: senderId }, select: { name: true } });
+    await notificationService.notify({ userId: receiverId, type: 'MESSAGE_RECEIVED', entityId: swap.id, params: { name: sender?.name.split(' ')[0] ?? '' }, dedupeKey: `msg:${swap.id}:${receiverId}:${bucket}` });
+  }
 
-    if (!swap) {
-      throw new NotFoundError('Swap not found');
+  async send(senderId: string, swapId: string, content: string): Promise<MessageDto> {
+    const swap = await this.participantSwap(swapId, senderId);
+    const receiverId = await this.assertOpen(swap, senderId);
+    const text = cleanText(content);
+    if (!text) throw new ValidationError('Message cannot be empty');
+    const m = await prisma.message.create({ data: { swapId, senderId, content: text.slice(0, 2000) } });
+    await this.deliver(m, swap, receiverId, senderId);
+    return toMessageDto(m);
+  }
+
+  /** Used when the swap request itself carries an introductory message. */
+  async createSystemOrFirst(swapId: string, senderId: string, content: string): Promise<void> {
+    const text = cleanText(content);
+    if (!text) return;
+    await prisma.message.create({ data: { swapId, senderId, content: text.slice(0, 2000) } });
+  }
+
+  /** Image attachments only, validated by magic bytes, stored privately. */
+  async sendImage(senderId: string, swapId: string, file: { buffer: Buffer; mimetype: string }, caption?: string): Promise<MessageDto> {
+    const swap = await this.participantSwap(swapId, senderId);
+    const receiverId = await this.assertOpen(swap, senderId);
+    let mime;
+    try {
+      mime = validateUpload(file.buffer, file.mimetype, IMAGE_UPLOAD_POLICY);
+    } catch (e) {
+      if (e instanceof UploadValidationError) throw new UploadInvalidError(e.message);
+      throw e;
     }
+    const key = await storageService.putPrivate(file.buffer, mime, `chat/${swapId}`, `${senderId}_${Date.now()}_${sha256Hex(file.buffer).slice(0, 10)}`);
+    const m = await prisma.message.create({ data: { swapId, senderId, content: cleanText(caption ?? '').slice(0, 500), messageType: 'IMAGE', attachments: [key].slice(0, MAX_ATTACHMENTS) } });
+    await this.deliver(m, swap, receiverId, senderId);
+    return toMessageDto(m);
+  }
 
-    if (swap.initiatorId !== userId && swap.receiverId !== userId) {
-      throw new ForbiddenError('You do not have access to this conversation');
-    }
+  async attachmentUrl(userId: string, messageId: string, index: number) {
+    const m = await prisma.message.findUnique({ where: { id: messageId } });
+    if (!m) throw new NotFoundError('Attachment not found');
+    await this.participantSwap(m.swapId, userId);
+    const key = m.attachments[index];
+    if (!key || m.isDeleted) throw new NotFoundError('Attachment not found');
+    return { url: storageService.signedUrl(key, 120) };
+  }
 
-    const { page, perPage } = pagination;
-    const skip = (page - 1) * perPage;
-
-    const [messages, total] = await Promise.all([
-      prisma.message.findMany({
-        where: {
-          swapId,
-          isDeleted: false,
-        },
-        skip,
-        take: perPage,
-        orderBy: { createdAt: 'desc' },
-        include: {
-          sender: {
-            select: {
-              id: true,
-              name: true,
-              image: true,
-              rating: true,
-            },
-          },
-        },
-      }),
-      prisma.message.count({
-        where: {
-          swapId,
-          isDeleted: false,
-        },
-      }),
+  async list(userId: string, swapId: string, page: number, perPage: number) {
+    await this.participantSwap(swapId, userId);
+    const where = { swapId };
+    const [rows, total] = await Promise.all([
+      prisma.message.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (page - 1) * perPage, take: perPage }),
+      prisma.message.count({ where }),
     ]);
-
-    return {
-      data: messages.reverse(), // Return in chronological order
-      meta: {
-        page,
-        perPage,
-        total,
-        totalPages: Math.ceil(total / perPage),
-        hasMore: page < Math.ceil(total / perPage),
-      },
-    };
+    return { items: rows.reverse().map(toMessageDto), total };
   }
 
-  /**
-   * Send a message
-   */
-  async sendMessage(
-    userId: string,
-    swapId: string,
-    content: string,
-    messageType: MessageType = MessageType.TEXT
-  ) {
-    // Verify swap exists and user has access
-    const swap = await prisma.swap.findUnique({
-      where: { id: swapId },
-      include: {
-        initiator: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
-        receiver: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
-      },
-    });
-
-    if (!swap) {
-      throw new NotFoundError('Swap not found');
+  /** Read receipts: marks everything the OTHER party sent as read. */
+  async markRead(userId: string, swapId: string): Promise<number> {
+    const swap = await this.participantSwap(swapId, userId);
+    const now = new Date();
+    const r = await prisma.message.updateMany({ where: { swapId, senderId: { not: userId }, readAt: null }, data: { readAt: now } });
+    if (r.count > 0) {
+      const other = swap.initiatorId === userId ? swap.receiverId : swap.initiatorId;
+      emitToUser(other, 'message:read', { swapId, readerId: userId, readAt: now.toISOString() });
+      emitToUser(userId, 'message:unread', { swapId, total: await this.unreadTotal(userId) });
     }
-
-    if (swap.initiatorId !== userId && swap.receiverId !== userId) {
-      throw new ForbiddenError('You do not have access to this conversation');
-    }
-
-    if (!content || content.trim().length === 0) {
-      throw new BadRequestError('Message content cannot be empty');
-    }
-
-    const message = await prisma.message.create({
-      data: {
-        swapId,
-        senderId: userId,
-        content: content.trim(),
-        messageType,
-      },
-      include: {
-        sender: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-          },
-        },
-      },
-    });
-
-    // Update swap's updatedAt
-    await prisma.swap.update({
-      where: { id: swapId },
-      data: { updatedAt: new Date() },
-    });
-
-    // Send notification to the other user
-    const recipientId = swap.initiatorId === userId ? swap.receiverId : swap.initiatorId;
-    const senderName = swap.initiatorId === userId ? swap.initiator.name : swap.receiver.name;
-
-    await prisma.notification.create({
-      data: {
-        userId: recipientId,
-        type: 'MESSAGE_RECEIVED',
-        title: 'New Message',
-        message: `${senderName} sent you a message`,
-        link: `/swaps/${swapId}/messages`,
-        data: {
-          swapId,
-          messageId: message.id,
-        },
-      },
-    });
-
-    logger.info(`Message sent: ${message.id} in swap ${swapId}`);
-
-    return message;
+    return r.count;
   }
 
-  /**
-   * Send message with attachments
-   */
-  async sendMessageWithAttachments(
-    userId: string,
-    swapId: string,
-    content: string,
-    files: Express.Multer.File[]
-  ) {
-    // Verify swap exists and user has access
-    const swap = await prisma.swap.findUnique({
-      where: { id: swapId },
-      include: {
-        initiator: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
-        receiver: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
-      },
+  async unreadTotal(userId: string): Promise<number> {
+    return prisma.message.count({
+      where: { readAt: null, isDeleted: false, senderId: { not: userId }, swap: { OR: [{ initiatorId: userId }, { receiverId: userId }] } },
     });
+  }
 
-    if (!swap) {
-      throw new NotFoundError('Swap not found');
-    }
-
-    if (swap.initiatorId !== userId && swap.receiverId !== userId) {
-      throw new ForbiddenError('You do not have access to this conversation');
-    }
-
-    // Upload files to Cloudinary
-    const uploadPromises = files.map(file =>
-      this.uploadService.uploadMessageAttachment(file, swapId)
+  async conversations(userId: string, page: number, perPage: number): Promise<{ items: ConversationDto[]; total: number }> {
+    const where = { OR: [{ initiatorId: userId }, { receiverId: userId }], messages: { some: {} } };
+    const [swaps, total] = await Promise.all([
+      prisma.swap.findMany({ where, orderBy: { updatedAt: 'desc' }, skip: (page - 1) * perPage, take: perPage }),
+      prisma.swap.count({ where }),
+    ]);
+    const items = await Promise.all(
+      swaps.map(async (s) => {
+        const otherId = s.initiatorId === userId ? s.receiverId : s.initiatorId;
+        const [other, last, unread] = await Promise.all([
+          prisma.user.findUniqueOrThrow({ where: { id: otherId } }),
+          prisma.message.findFirst({ where: { swapId: s.id }, orderBy: { createdAt: 'desc' } }),
+          prisma.message.count({ where: { swapId: s.id, senderId: { not: userId }, readAt: null, isDeleted: false } }),
+        ]);
+        return { swapId: s.id, swapStatus: s.status, other: toPublicUser(other), lastMessage: last ? toMessageDto(last) : null, unreadCount: unread };
+      })
     );
-    const uploadedFiles = await Promise.all(uploadPromises);
-
-    const attachmentUrls = uploadedFiles.map(file => file.secure_url);
-
-    const message = await prisma.message.create({
-      data: {
-        swapId,
-        senderId: userId,
-        content: content || '',
-        messageType: MessageType.IMAGE,
-        attachments: attachmentUrls,
-      },
-      include: {
-        sender: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-          },
-        },
-      },
-    });
-
-    // Update swap's updatedAt
-    await prisma.swap.update({
-      where: { id: swapId },
-      data: { updatedAt: new Date() },
-    });
-
-    // Send notification
-    const recipientId = swap.initiatorId === userId ? swap.receiverId : swap.initiatorId;
-    const senderName = swap.initiatorId === userId ? swap.initiator.name : swap.receiver.name;
-
-    await prisma.notification.create({
-      data: {
-        userId: recipientId,
-        type: 'MESSAGE_RECEIVED',
-        title: 'New Message',
-        message: `${senderName} sent you ${files.length} attachment(s)`,
-        link: `/swaps/${swapId}/messages`,
-        data: {
-          swapId,
-          messageId: message.id,
-        },
-      },
-    });
-
-    logger.info(`Message with attachments sent: ${message.id} in swap ${swapId}`);
-
-    return message;
+    return { items, total };
   }
 
-  /**
-   * Get message by ID
-   */
-  async getMessageById(messageId: string, userId: string) {
-    const message = await prisma.message.findUnique({
-      where: { id: messageId },
-      include: {
-        sender: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-          },
-        },
-        swap: {
-          select: {
-            id: true,
-            initiatorId: true,
-            receiverId: true,
-          },
-        },
-      },
-    });
-
-    if (!message) {
-      throw new NotFoundError('Message not found');
-    }
-
-    // Check if user has access
-    if (
-      message.swap.initiatorId !== userId &&
-      message.swap.receiverId !== userId
-    ) {
-      throw new ForbiddenError('You do not have access to this message');
-    }
-
-    return message;
+  async edit(userId: string, messageId: string, content: string): Promise<MessageDto> {
+    const m = await prisma.message.findUnique({ where: { id: messageId } });
+    if (!m || m.senderId !== userId) throw new NotFoundError('Message not found');
+    if (m.messageType !== 'TEXT' || m.isDeleted) throw new InvalidStateError('This message cannot be edited');
+    if (Date.now() - m.createdAt.getTime() > EDIT_WINDOW_MS) throw new InvalidStateError('Messages can only be edited for 5 minutes');
+    const text = cleanText(content);
+    if (!text) throw new ValidationError('Message cannot be empty');
+    const updated = await prisma.message.update({ where: { id: messageId }, data: { content: text, isEdited: true, editedAt: new Date() } });
+    const swap = await prisma.swap.findUniqueOrThrow({ where: { id: m.swapId } });
+    emitToUser(swap.initiatorId === userId ? swap.receiverId : swap.initiatorId, 'message:updated', toMessageDto(updated));
+    return toMessageDto(updated);
   }
 
-  /**
-   * Edit a message
-   */
-  async editMessage(messageId: string, userId: string, content: string) {
-    const message = await prisma.message.findUnique({
-      where: { id: messageId },
-    });
-
-    if (!message) {
-      throw new NotFoundError('Message not found');
-    }
-
-    if (message.senderId !== userId) {
-      throw new ForbiddenError('You can only edit your own messages');
-    }
-
-    if (message.isDeleted) {
-      throw new BadRequestError('Cannot edit a deleted message');
-    }
-
-    if (!content || content.trim().length === 0) {
-      throw new BadRequestError('Message content cannot be empty');
-    }
-
-    const updatedMessage = await prisma.message.update({
-      where: { id: messageId },
-      data: {
-        content: content.trim(),
-        isEdited: true,
-        editedAt: new Date(),
-      },
-      include: {
-        sender: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-          },
-        },
-      },
-    });
-
-    logger.info(`Message edited: ${messageId} by user ${userId}`);
-
-    return updatedMessage;
+  async remove(userId: string, messageId: string): Promise<void> {
+    const m = await prisma.message.findUnique({ where: { id: messageId } });
+    if (!m || m.senderId !== userId) throw new NotFoundError('Message not found');
+    await prisma.message.update({ where: { id: messageId }, data: { isDeleted: true, deletedAt: new Date() } });
+    const swap = await prisma.swap.findUniqueOrThrow({ where: { id: m.swapId } });
+    emitToUser(swap.initiatorId === userId ? swap.receiverId : swap.initiatorId, 'message:deleted', { id: messageId, swapId: m.swapId });
   }
 
-  /**
-   * Delete a message (soft delete)
-   */
-  async deleteMessage(messageId: string, userId: string) {
-    const message = await prisma.message.findUnique({
-      where: { id: messageId },
-    });
-
-    if (!message) {
-      throw new NotFoundError('Message not found');
+  async report(userId: string, messageId: string, reason: string): Promise<void> {
+    const m = await prisma.message.findUnique({ where: { id: messageId } });
+    if (!m) throw new NotFoundError('Message not found');
+    await this.participantSwap(m.swapId, userId);
+    if (m.senderId === userId) throw new ForbiddenError('You cannot report your own message');
+    try {
+      await prisma.messageReport.create({ data: { messageId, reporterId: userId, reason: cleanText(reason).slice(0, 500) } });
+    } catch {
+      /* already reported by this user — idempotent */
     }
-
-    if (message.senderId !== userId) {
-      throw new ForbiddenError('You can only delete your own messages');
-    }
-
-    await prisma.message.update({
-      where: { id: messageId },
-      data: {
-        isDeleted: true,
-        deletedAt: new Date(),
-        content: '[Message deleted]',
-      },
-    });
-
-    logger.info(`Message deleted: ${messageId} by user ${userId}`);
-  }
-
-  /**
-   * Mark a message as read
-   */
-  async markAsRead(messageId: string, userId: string) {
-    const message = await prisma.message.findUnique({
-      where: { id: messageId },
-      include: {
-        swap: true,
-      },
-    });
-
-    if (!message) {
-      throw new NotFoundError('Message not found');
-    }
-
-    // Can only mark messages you received as read
-    if (message.senderId === userId) {
-      throw new BadRequestError('Cannot mark your own message as read');
-    }
-
-    // Verify user has access to this conversation
-    if (
-      message.swap.initiatorId !== userId &&
-      message.swap.receiverId !== userId
-    ) {
-      throw new ForbiddenError('You do not have access to this message');
-    }
-
-    await prisma.message.update({
-      where: { id: messageId },
-      data: {
-        isRead: true,
-        readAt: new Date(),
-      },
-    });
-
-    logger.info(`Message marked as read: ${messageId} by user ${userId}`);
-  }
-
-  /**
-   * Mark all messages in a conversation as read
-   */
-  async markConversationAsRead(swapId: string, userId: string) {
-    const swap = await prisma.swap.findUnique({
-      where: { id: swapId },
-    });
-
-    if (!swap) {
-      throw new NotFoundError('Swap not found');
-    }
-
-    if (swap.initiatorId !== userId && swap.receiverId !== userId) {
-      throw new ForbiddenError('You do not have access to this conversation');
-    }
-
-    await prisma.message.updateMany({
-      where: {
-        swapId,
-        senderId: { not: userId },
-        isRead: false,
-        isDeleted: false,
-      },
-      data: {
-        isRead: true,
-        readAt: new Date(),
-      },
-    });
-
-    logger.info(`Conversation marked as read: ${swapId} by user ${userId}`);
-  }
-
-  /**
-   * Get unread message count for a user
-   */
-  async getUnreadCount(userId: string) {
-    const count = await prisma.message.count({
-      where: {
-        swap: {
-          OR: [{ initiatorId: userId }, { receiverId: userId }],
-        },
-        senderId: { not: userId },
-        isRead: false,
-        isDeleted: false,
-      },
-    });
-
-    return count;
-  }
-
-  /**
-   * Report a message
-   */
-  async reportMessage(
-    messageId: string,
-    userId: string,
-    reason: string,
-    description: string
-  ) {
-    const message = await prisma.message.findUnique({
-      where: { id: messageId },
-      include: {
-        swap: true,
-      },
-    });
-
-    if (!message) {
-      throw new NotFoundError('Message not found');
-    }
-
-    // Verify user has access to this conversation
-    if (
-      message.swap.initiatorId !== userId &&
-      message.swap.receiverId !== userId
-    ) {
-      throw new ForbiddenError('You do not have access to this message');
-    }
-
-    if (message.senderId === userId) {
-      throw new BadRequestError('Cannot report your own message');
-    }
-
-    // Create admin log for the report
-    await prisma.adminLog.create({
-      data: {
-        adminId: userId,
-        action: 'CONTENT_MODERATED',
-        targetType: 'Message',
-        targetId: messageId,
-        details: `Message reported: ${reason} - ${description}`,
-      },
-    });
-
-    logger.warn(`Message reported: ${messageId} by user ${userId} - Reason: ${reason}`);
-  }
-
-  /**
-   * Delete entire conversation (for one user)
-   */
-  async deleteConversation(swapId: string, userId: string) {
-    const swap = await prisma.swap.findUnique({
-      where: { id: swapId },
-    });
-
-    if (!swap) {
-      throw new NotFoundError('Swap not found');
-    }
-
-    if (swap.initiatorId !== userId && swap.receiverId !== userId) {
-      throw new ForbiddenError('You do not have access to this conversation');
-    }
-
-    // Soft delete all messages in the conversation
-    await prisma.message.updateMany({
-      where: { swapId },
-      data: {
-        isDeleted: true,
-        deletedAt: new Date(),
-      },
-    });
-
-    logger.info(`Conversation deleted: ${swapId} by user ${userId}`);
-  }
-
-  /**
-   * Get message statistics for a swap
-   */
-  async getMessageStats(swapId: string, userId: string) {
-    const swap = await prisma.swap.findUnique({
-      where: { id: swapId },
-    });
-
-    if (!swap) {
-      throw new NotFoundError('Swap not found');
-    }
-
-    if (swap.initiatorId !== userId && swap.receiverId !== userId) {
-      throw new ForbiddenError('You do not have access to this conversation');
-    }
-
-    const [total, unread, sent, received] = await Promise.all([
-      prisma.message.count({
-        where: { swapId, isDeleted: false },
-      }),
-      prisma.message.count({
-        where: {
-          swapId,
-          senderId: { not: userId },
-          isRead: false,
-          isDeleted: false,
-        },
-      }),
-      prisma.message.count({
-        where: { swapId, senderId: userId, isDeleted: false },
-      }),
-      prisma.message.count({
-        where: { swapId, senderId: { not: userId }, isDeleted: false },
-      }),
-    ]);
-
-    return {
-      total,
-      unread,
-      sent,
-      received,
-    };
   }
 }
+
+export const messageService = new MessageService();
