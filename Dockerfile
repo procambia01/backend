@@ -9,8 +9,9 @@ RUN apt-get update -y && apt-get install -y openssl && rm -rf /var/lib/apt/lists
 
 # Install deps first (better layer caching — only reinstalls when
 # package.json/lock actually change, not on every source edit)
-COPY package.json package-lock.json ./
-RUN npm ci
+# package-lock.json is optional: use `npm ci` when present, else `npm install`
+COPY package.json package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
 # Now copy source and build
 COPY prisma ./prisma
